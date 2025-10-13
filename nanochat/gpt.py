@@ -256,8 +256,16 @@ class GPT(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
-        B, T = idx.size()
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', input_embeds=None):
+        if (idx is None) == (input_embeds is None):
+            raise ValueError("Pass exactly one of `idx` or `input_embeds`.")
+        device = self.get_device()
+        if input_embeds is not None:
+            x = input_embeds.to(device=device)
+            B, T, _ = x.size()
+        else:
+            B, T = idx.size()
+            x = self.transformer.wte(idx)
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim))
         assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
@@ -291,22 +299,25 @@ class GPT(nn.Module):
             return logits
 
     @torch.inference_mode()
-    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
+    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42, input_embeds=None):
         """
         Naive autoregressive streaming inference.
         To make it super simple, let's assume:
         - batch size is 1
         - ids and the yielded tokens are simple Python lists and ints
         """
+        if (tokens is None) == (input_embeds is None):
+            raise ValueError("Pass exactly one of `tokens` or `input_embeds`.")
         assert isinstance(tokens, list)
         device = self.get_device()
         rng = None
         if temperature > 0:
             rng = torch.Generator(device=device)
             rng.manual_seed(seed)
-        ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
+        if tokens:
+            ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
         for _ in range(max_tokens):
-            logits = self.forward(ids) # (B, T, vocab_size)
+            logits = self.forward(ids, input_embeds=input_embeds) # (B, T, vocab_size)
             logits = logits[:, -1, :] # (B, vocab_size)
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -320,3 +331,5 @@ class GPT(nn.Module):
             ids = torch.cat((ids, next_ids), dim=1)
             token = next_ids.item()
             yield token
+    
+    
