@@ -110,14 +110,14 @@ python -m pytest tests/test_rustbpe.py -v -s
 ```
 
 ## Support for Vision
-- [] input_embed support in forward
-- [] input_embed support in generate
-- [] adding a lightweight vision encoder
-- [] add visioin tokens
-- [] prepare a tiny vision dataset to train
-- [] an embedding function for vision
-- [] [optional] support for LoRa
-- [] [optional] support for MoE
+- [ ] input_embed support in forward
+- [ ] input_embed support in generate
+- [ ] adding a lightweight vision encoder
+- [ ] add visioin tokens
+- [ ] prepare a tiny vision dataset to train
+- [ ] an embedding function for vision
+- [ ] [optional] support for LoRa
+- [ ] [optional] support for MoE
 
 
 ## Contributing
