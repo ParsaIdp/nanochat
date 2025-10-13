@@ -109,6 +109,17 @@ I haven't invested too much here but some tests exist, especially for the tokeni
 python -m pytest tests/test_rustbpe.py -v -s
 ```
 
+## Support for Vision
+([]) input_embed support in forward
+([]) input_embed support in generate
+([]) adding a lightweight vision encoder
+([]) add visioin tokens
+([]) prepare a tiny vision dataset to train
+([]) an embedding function for vision
+([]) [optional] support for LoRa
+([]) [optional] support for MoE
+
+
 ## Contributing
 
 nanochat is nowhere finished. The goal is to improve the state of the art in micro models that are accessible to work with end to end on budgets of < $1000 dollars. Accessibility is about overall cost but also about cognitive complexity - nanochat is not an exhaustively configurable LLM "framework"; there will be no giant configuration objects, model factories, or if-then-else monsters in the code base. It is a single, cohesive, minimal, readable, hackable, maximally-forkable "strong baseline" codebase designed to run start to end and produce a concrete ChatGPT clone and its report card.
