@@ -161,9 +161,12 @@ class Engine:
         self.tokenizer = tokenizer # needed for tool use
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
+    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42, input_embeds=None):
         """Same as generate, but does single prefill and then clones the KV cache."""
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
+        if (tokens is None) == (input_embeds is None):
+            raise ValueError("Pass exactly one of `tokens` or `input_embeds`.")
+            
         device = self.model.get_device()
         rng = torch.Generator(device=device)
         rng.manual_seed(seed)
