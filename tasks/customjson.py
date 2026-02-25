@@ -5,7 +5,7 @@ Each line in the JSONL file should be a JSON array of messages.
 
 import os
 import json
-from tasks.common import Task
+from tasks.common import Conversation, Task
 
 class CustomJSON(Task):
     """
@@ -14,10 +14,10 @@ class CustomJSON(Task):
     Example line: [{"role":"user","content":"Hi"},{"role":"assistant","content":"Hello"}]
     """
 
-    def __init__(self, filepath, **kwargs):
+    def __init__(self, filepath: str, **kwargs) -> None:
         super().__init__(**kwargs)
         self.filepath = filepath
-        self.conversations = []
+        self.conversations: list[list[dict[str, str]]] = []
 
         # Load all conversations from the JSONL file
         if not os.path.exists(filepath):
@@ -53,10 +53,10 @@ class CustomJSON(Task):
 
         self.length = len(self.conversations)
 
-    def num_examples(self):
+    def num_examples(self) -> int:
         return self.length
 
-    def get_example(self, index):
+    def get_example(self, index: int) -> Conversation:
         messages = self.conversations[index]
         conversation = {
             "messages": messages,

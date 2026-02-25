@@ -10,6 +10,8 @@ For details of how the dataset was prepared, see `repackage_data_reference.py`.
 import os
 import argparse
 import time
+from collections.abc import Generator
+
 import requests
 import pyarrow.parquet as pq
 from multiprocessing import Pool
@@ -22,7 +24,9 @@ from nanochat.common import get_base_dir
 # The URL on the internet where the data is hosted and downloaded from on demand
 BASE_URL = "https://huggingface.co/datasets/karpathy/fineweb-edu-100b-shuffle/resolve/main"
 MAX_SHARD = 1822 # the last datashard is shard_01822.parquet
-index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
+def index_to_filename(index: int) -> str:
+    """Convert a shard index to its parquet filename."""
+    return f"shard_{index:05d}.parquet"
 base_dir = get_base_dir()
 DATA_DIR = os.path.join(base_dir, "base_data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -30,8 +34,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # -----------------------------------------------------------------------------
 # These functions are useful utilities to other modules, can/should be imported
 
-def list_parquet_files(data_dir=None):
-    """ Looks into a data dir and returns full paths to all parquet files. """
+def list_parquet_files(data_dir: str | None = None) -> list[str]:
+    """Looks into a data dir and returns full paths to all parquet files."""
     data_dir = DATA_DIR if data_dir is None else data_dir
     parquet_files = sorted([
         f for f in os.listdir(data_dir)
@@ -40,7 +44,7 @@ def list_parquet_files(data_dir=None):
     parquet_paths = [os.path.join(data_dir, f) for f in parquet_files]
     return parquet_paths
 
-def parquets_iter_batched(split, start=0, step=1):
+def parquets_iter_batched(split: str, start: int = 0, step: int = 1) -> Generator[list[str], None, None]:
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
     - split can be "train" or "val". the last parquet file will be val.
@@ -57,7 +61,7 @@ def parquets_iter_batched(split, start=0, step=1):
             yield texts
 
 # -----------------------------------------------------------------------------
-def download_single_file(index):
+def download_single_file(index: int) -> bool:
     """ Downloads a single file index, with some backoff """
 
     # Construct the local filepath for this file and skip if it already exists

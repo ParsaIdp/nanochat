@@ -2,11 +2,13 @@
 A number of functions that help with evaluating a base model.
 """
 import math
+from collections.abc import Iterator
+
 import torch
 import torch.distributed as dist
 
 @torch.no_grad()
-def evaluate_bpb(model, batches, steps, token_bytes):
+def evaluate_bpb(model: torch.nn.Module, batches: Iterator, steps: int, token_bytes: torch.Tensor) -> float:
     """
     Instead of the naive 'mean loss', this function returns the bits per byte (bpb),
     which is a tokenization vocab size-independent metric, meaning you are still comparing

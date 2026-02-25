@@ -1,4 +1,7 @@
+"""Streaming distributed data loader that tokenizes and batches pretraining text."""
+
 from collections import deque
+from collections.abc import Generator
 
 import torch
 import pyarrow.parquet as pq
@@ -7,7 +10,7 @@ from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
 from nanochat.tokenizer import get_tokenizer
 
-def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):
+def tokenizing_distributed_data_loader_with_state(B: int, T: int, split: str, tokenizer_threads: int = 4, tokenizer_batch_size: int = 128, device: str = "cuda", resume_state_dict: dict | None = None, tokenizer_path: str | None = None) -> Generator[tuple[torch.Tensor, torch.Tensor, dict], None, None]:
     """
     Stream pretraining text from parquet files, tokenize, yield training batches.
 
@@ -24,7 +27,7 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
 
     # infinite iterator over document batches (list of text strings)
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-    def document_batches():
+    def document_batches() -> Generator[tuple[list[str], tuple[int, int]], None, None]:
         parquet_paths = list_parquet_files()
         assert len(parquet_paths) != 0, "No dataset parquet files found, did you run dataset.py?"
         parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
@@ -63,7 +66,7 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
     # Now emit batches of tokens.
     needed_tokens = B * T + 1 # +1 is because we also need the target at the last token
     # get the tokenizer and the bos token
-    tokenizer = get_tokenizer()
+    tokenizer = get_tokenizer(tokenizer_path=tokenizer_path)
     bos_token = tokenizer.get_bos_token_id()
     # scratch buffer holds the tokens for one iteration
     token_buffer = deque() # we stream tokens on the right and pop from the left
@@ -88,7 +91,7 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
         state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx} # we need this in case we wish to approximately resume training
         yield inputs, targets, state_dict
 
-def tokenizing_distributed_data_loader(*args, **kwargs):
-    # helper function that only emits the inputs/targets and not the state_dict
+def tokenizing_distributed_data_loader(*args, **kwargs) -> Generator[tuple[torch.Tensor, torch.Tensor], None, None]:
+    """Helper that only emits inputs/targets without the state_dict."""
     for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state(*args, **kwargs):
         yield inputs, targets

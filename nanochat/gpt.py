@@ -1,19 +1,22 @@
 """
-GPT model (rewrite, a lot simpler)
-Notable features:
-- rotary embeddings (and no positional embeddings)
-- QK norm
-- untied weights for token embedding and lm_head
-- relu^2 activation in MLP
-- norm after token embedding
-- no learnable params in rmsnorm
-- no bias in linear layers
-- Group-Query Attention (GQA) support for more efficient inference
+GPT model architecture for nanochat.
+
+A simplified GPT implementation with the following design choices:
+- Rotary positional embeddings (no learned position embeddings)
+- QK normalization for stable attention
+- Untied weights for token embedding and lm_head
+- ReluSquared (relu^2) activation in MLP
+- RMSNorm after token embedding (no learnable parameters)
+- No bias in any linear layers
+- Group-Query Attention (GQA) support for efficient inference
 """
 
+from __future__ import annotations
+
 import math
-from functools import partial
 from dataclasses import dataclass
+from functools import partial
+from typing import Generator
 
 import torch
 import torch.nn as nn
@@ -22,23 +25,65 @@ import torch.nn.functional as F
 from nanochat.common import get_dist_info, print0
 from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
+from nanochat.lz78_embedding import LZ78Embedding
 
 @dataclass
 class GPTConfig:
-    sequence_len: int = 1024
-    vocab_size: int = 50304
-    n_layer: int = 12
-    n_head: int = 6 # number of query heads
-    n_kv_head: int = 6 # number of key/value heads (GQA)
-    n_embd: int = 768
+    """Configuration for the GPT model architecture."""
+
+    sequence_len: int = 1024  # maximum input sequence length
+    vocab_size: int = 50304  # number of tokens in the vocabulary
+    n_layer: int = 12  # number of transformer blocks
+    n_head: int = 6  # number of query attention heads
+    n_kv_head: int = 6  # number of key/value heads (for GQA; must divide n_head)
+    n_embd: int = 768  # model embedding dimension
+    embedding_mode: str = "flat"  # "flat", "structured", "hierarchical", or "tuple"
+    token_metadata_path: str = ""  # path to token_metadata.pt (required for structured/hierarchical)
+
+    def validate(self) -> None:
+        """Validate configuration invariants.
+
+        Raises:
+            ValueError: If any configuration constraint is violated.
+        """
+        if self.vocab_size <= 0:
+            raise ValueError(f"vocab_size must be positive, got {self.vocab_size}")
+        if self.n_embd <= 0:
+            raise ValueError(f"n_embd must be positive, got {self.n_embd}")
+        if self.n_head <= 0:
+            raise ValueError(f"n_head must be positive, got {self.n_head}")
+        if self.n_kv_head <= 0:
+            raise ValueError(f"n_kv_head must be positive, got {self.n_kv_head}")
+        if self.n_embd % self.n_head != 0:
+            raise ValueError(
+                f"n_embd ({self.n_embd}) must be divisible by n_head ({self.n_head})"
+            )
+        if self.n_head % self.n_kv_head != 0:
+            raise ValueError(
+                f"n_head ({self.n_head}) must be divisible by n_kv_head ({self.n_kv_head})"
+            )
+        if self.n_kv_head > self.n_head:
+            raise ValueError(
+                f"n_kv_head ({self.n_kv_head}) must not exceed n_head ({self.n_head})"
+            )
+        if self.sequence_len <= 0:
+            raise ValueError(f"sequence_len must be positive, got {self.sequence_len}")
+        if self.n_layer <= 0:
+            raise ValueError(f"n_layer must be positive, got {self.n_layer}")
+        valid_modes = ("flat", "structured", "hierarchical", "tuple")
+        if self.embedding_mode not in valid_modes:
+            raise ValueError(
+                f"embedding_mode must be one of {valid_modes}, got '{self.embedding_mode}'"
+            )
 
 
-def norm(x):
-    # Purely functional rmsnorm with no learnable params
+def norm(x: torch.Tensor) -> torch.Tensor:
+    """Apply RMSNorm without learnable parameters."""
     return F.rms_norm(x, (x.size(-1),))
 
 
-def apply_rotary_emb(x, cos, sin):
+def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Apply rotary positional embeddings to a multihead attention tensor."""
     assert x.ndim == 4  # multihead attention
     d = x.shape[3] // 2
     x1, x2 = x[..., :d], x[..., d:] # split up last dim into two halves
@@ -47,7 +92,9 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config, layer_idx):
+    """Multi-head causal self-attention with GQA and rotary embeddings."""
+
+    def __init__(self, config: GPTConfig, layer_idx: int) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.n_head = config.n_head
@@ -61,7 +108,7 @@ class CausalSelfAttention(nn.Module):
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
-    def forward(self, x, cos_sin, kv_cache):
+    def forward(self, x: torch.Tensor, cos_sin: tuple[torch.Tensor, torch.Tensor], kv_cache: object | None) -> torch.Tensor:
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
@@ -108,12 +155,14 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, config):
+    """Feed-forward network with ReluSquared activation."""
+
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.c_fc(x)
         x = F.relu(x).square()
         x = self.c_proj(x)
@@ -121,19 +170,23 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config, layer_idx):
+    """Single transformer block with pre-norm attention and MLP."""
+
+    def __init__(self, config: GPTConfig, layer_idx: int) -> None:
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, cos_sin, kv_cache):
+    def forward(self, x: torch.Tensor, cos_sin: tuple[torch.Tensor, torch.Tensor], kv_cache: object | None) -> torch.Tensor:
         x = x + self.attn(norm(x), cos_sin, kv_cache)
         x = x + self.mlp(norm(x))
         return x
 
 
 class GPT(nn.Module):
-    def __init__(self, config, pad_vocab_size_to=64):
+    """GPT language model with rotary embeddings and logit soft-capping."""
+
+    def __init__(self, config: GPTConfig, pad_vocab_size_to: int = 64) -> None:
         super().__init__()
         self.config = config
         # For DDP, we want vocab_size divisible by world_size. Also, there are potential performance benefits, see:
@@ -141,8 +194,16 @@ class GPT(nn.Module):
         padded_vocab_size = ((config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to) * pad_vocab_size_to
         if padded_vocab_size != config.vocab_size:
             print0(f"Padding vocab_size from {config.vocab_size} to {padded_vocab_size} to be divisible by {pad_vocab_size_to}")
+        # Build token embedding: flat nn.Embedding or structured LZ78Embedding
+        self._padded_vocab_size = padded_vocab_size
+        if config.embedding_mode == "flat":
+            wte = nn.Embedding(padded_vocab_size, config.n_embd)
+        else:
+            # Create with dummy metadata on meta device; real metadata loaded in init_weights
+            dummy_metadata = torch.zeros(padded_vocab_size, 2, dtype=torch.long)
+            wte = LZ78Embedding(config.embedding_mode, padded_vocab_size, config.n_embd, dummy_metadata)
         self.transformer = nn.ModuleDict({
-            "wte": nn.Embedding(padded_vocab_size, config.n_embd),
+            "wte": wte,
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
         self.lm_head = nn.Linear(config.n_embd, padded_vocab_size, bias=False)
@@ -156,7 +217,7 @@ class GPT(nn.Module):
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
         self.register_buffer("sin", sin, persistent=False)
 
-    def init_weights(self):
+    def init_weights(self) -> None:
         """
         Initialize the full model in this one function for maximum clarity.
 
@@ -172,7 +233,19 @@ class GPT(nn.Module):
         """
 
         # Embedding and unembedding
-        torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
+        if isinstance(self.transformer.wte, LZ78Embedding):
+            self.transformer.wte.init_weights()
+            # Load real metadata from disk (after to_empty moved everything to real device)
+            if self.config.token_metadata_path:
+                device = self.transformer.wte.weight.device
+                metadata = torch.load(self.config.token_metadata_path, map_location=device)
+                if metadata.shape[0] < self._padded_vocab_size:
+                    pad = torch.zeros(self._padded_vocab_size - metadata.shape[0], 2, dtype=metadata.dtype, device=device)
+                    metadata = torch.cat([metadata, pad], dim=0)
+                self.transformer.wte.parent_codes.copy_(metadata[:, 0])
+                self.transformer.wte.char_bytes.copy_(metadata[:, 1])
+        else:
+            torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
 
         # Transformer blocks: uniform init with bound = sqrt(3) * std (same standard deviation as normal)
@@ -192,10 +265,19 @@ class GPT(nn.Module):
         self.cos, self.sin = cos, sin
 
         # Cast token embeddings to bf16: optimizer can tolerate it and it saves memory
-        if self.transformer.wte.weight.device.type == "cuda":
-            self.transformer.wte.to(dtype=torch.bfloat16)
+        wte = self.transformer.wte
+        if wte.weight.device.type == "cuda":
+            if isinstance(wte, LZ78Embedding) and wte.mode != "flat":
+                wte.code_emb.to(dtype=torch.bfloat16)
+                wte.char_emb.to(dtype=torch.bfloat16)
+                if hasattr(wte, 'proj'):
+                    wte.proj.to(dtype=torch.bfloat16)
+            else:
+                wte.to(dtype=torch.bfloat16)
 
-    def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
+    def _precompute_rotary_embeddings(
+        self, seq_len: int, head_dim: int, base: int = 10000, device: torch.device | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # TODO: bump base theta more? e.g. 100K is more common more recently
         # autodetect the device from model embeddings
         if device is None:
@@ -212,18 +294,25 @@ class GPT(nn.Module):
         cos, sin = cos[None, :, None, :], sin[None, :, None, :] # add batch and head dims for later broadcasting
         return cos, sin
 
-    def get_device(self):
+    def get_device(self) -> torch.device:
+        """Return the device of the model parameters."""
         return self.transformer.wte.weight.device
 
-    def estimate_flops(self):
-        """ Return the estimated FLOPs per token for the model. Ref: https://arxiv.org/abs/2204.02311 """
+    def estimate_flops(self) -> int:
+        """Return the estimated FLOPs per token. Ref: https://arxiv.org/abs/2204.02311"""
         nparams = sum(p.numel() for p in self.parameters())
-        nparams_embedding = self.transformer.wte.weight.numel()
+        nparams_embedding = sum(p.numel() for p in self.transformer.wte.parameters())
         l, h, q, t = self.config.n_layer, self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
         num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
         return num_flops_per_token
 
-    def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0):
+    def setup_optimizers(
+        self,
+        unembedding_lr: float = 0.004,
+        embedding_lr: float = 0.2,
+        matrix_lr: float = 0.02,
+        weight_decay: float = 0.0,
+    ) -> list[torch.optim.Optimizer]:
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
         # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
@@ -253,7 +342,13 @@ class GPT(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def forward(
+        self,
+        idx: torch.Tensor,
+        targets: torch.Tensor | None = None,
+        kv_cache: object | None = None,
+        loss_reduction: str = "mean",
+    ) -> torch.Tensor:
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -288,12 +383,17 @@ class GPT(nn.Module):
             return logits
 
     @torch.inference_mode()
-    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
-        """
-        Naive autoregressive streaming inference.
-        To make it super simple, let's assume:
-        - batch size is 1
-        - ids and the yielded tokens are simple Python lists and ints
+    def generate(
+        self,
+        tokens: list[int],
+        max_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        seed: int = 42,
+    ) -> Generator[int, None, None]:
+        """Generate tokens autoregressively via streaming.
+
+        Assumes batch size 1. Input and yielded tokens are plain Python ints.
         """
         assert isinstance(tokens, list)
         device = self.get_device()

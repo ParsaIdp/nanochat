@@ -5,21 +5,21 @@ We use the "smol" version, which is more appropriate for smaller models.
 """
 
 from datasets import load_dataset
-from tasks.common import Task
+from tasks.common import Conversation, Task
 
 class SmolTalk(Task):
     """ smol-smoltalk dataset. train is 460K rows, test is 24K rows. """
 
-    def __init__(self, split, **kwargs):
+    def __init__(self, split: str, **kwargs) -> None:
         super().__init__(**kwargs)
         assert split in ["train", "test"], "SmolTalk split must be train|test"
         self.ds = load_dataset("HuggingFaceTB/smol-smoltalk", split=split).shuffle(seed=42)
         self.length = len(self.ds)
 
-    def num_examples(self):
+    def num_examples(self) -> int:
         return self.length
 
-    def get_example(self, index):
+    def get_example(self, index: int) -> Conversation:
         row = self.ds[index]
         messages = row["messages"]
         # ---------------------------------------------------------------------

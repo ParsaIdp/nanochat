@@ -12,17 +12,17 @@ import platform
 import psutil
 import torch
 
-def run_command(cmd):
+def run_command(cmd: str) -> str | None:
     """Run a shell command and return output, or None if it fails."""
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
             return result.stdout.strip()
         return None
-    except:
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
         return None
 
-def get_git_info():
+def get_git_info() -> dict[str, str | bool]:
     """Get current git commit, branch, and dirty status."""
     info = {}
     info['commit'] = run_command("git rev-parse --short HEAD") or "unknown"
@@ -38,7 +38,7 @@ def get_git_info():
 
     return info
 
-def get_gpu_info():
+def get_gpu_info() -> dict:
     """Get GPU information."""
     if not torch.cuda.is_available():
         return {"available": False}
@@ -61,7 +61,7 @@ def get_gpu_info():
 
     return info
 
-def get_system_info():
+def get_system_info() -> dict[str, str | int | float]:
     """Get system information."""
     info = {}
 
@@ -83,7 +83,7 @@ def get_system_info():
 
     return info
 
-def estimate_cost(gpu_info, runtime_hours=None):
+def estimate_cost(gpu_info: dict, runtime_hours: float | None = None) -> dict[str, str | float | None] | None:
     """Estimate training cost based on GPU type and runtime."""
 
     # Rough pricing, from Lambda Cloud
@@ -114,7 +114,7 @@ def estimate_cost(gpu_info, runtime_hours=None):
         "estimated_total": hourly_rate * runtime_hours if runtime_hours else None
     }
 
-def generate_header():
+def generate_header() -> str:
     """Generate the header for a training report."""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -197,7 +197,7 @@ Generated: {timestamp}
 
 # -----------------------------------------------------------------------------
 
-def slugify(text):
+def slugify(text: str) -> str:
     """Slugify a text string."""
     return text.lower().replace(" ", "-")
 
@@ -218,7 +218,7 @@ EXPECTED_FILES = [
 # the metrics we're currently interested in
 chat_metrics = ["ARC-Easy", "ARC-Challenge", "MMLU", "GSM8K", "HumanEval", "ChatCORE"]
 
-def extract(section, keys):
+def extract(section: str, keys: str | list[str]) -> dict[str, str]:
     """simple def to extract a single key from a section"""
     if not isinstance(keys, list):
         keys = [keys] # convenience
@@ -229,25 +229,25 @@ def extract(section, keys):
                 out[key] = line.split(":")[1].strip()
     return out
 
-def extract_timestamp(content, prefix):
+def extract_timestamp(content: str, prefix: str) -> datetime.datetime | None:
     """Extract timestamp from content with given prefix."""
     for line in content.split('\n'):
         if line.startswith(prefix):
             time_str = line.split(":", 1)[1].strip()
             try:
                 return datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-            except:
+            except ValueError:
                 pass
     return None
 
 class Report:
     """Maintains a bunch of logs, generates a final markdown report."""
 
-    def __init__(self, report_dir):
+    def __init__(self, report_dir: str) -> None:
         os.makedirs(report_dir, exist_ok=True)
         self.report_dir = report_dir
 
-    def log(self, section, data):
+    def log(self, section: str, data: list) -> str:
         """Log a section of data to the report."""
         slug = slugify(section)
         file_name = f"{slug}.md"
@@ -275,7 +275,7 @@ class Report:
             f.write("\n")
         return file_path
 
-    def generate(self):
+    def generate(self) -> str:
         """Generate the final report."""
         report_dir = self.report_dir
         report_file = os.path.join(report_dir, "report.md")
@@ -369,7 +369,7 @@ class Report:
         shutil.copy(report_file, "report.md")
         return report_file
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset the report."""
         # Remove section files
         for file_name in EXPECTED_FILES:
@@ -393,12 +393,12 @@ class Report:
 # nanochat-specific convenience functions
 
 class DummyReport:
-    def log(self, *args, **kwargs):
+    def log(self, *args, **kwargs) -> None:
         pass
-    def reset(self, *args, **kwargs):
+    def reset(self, *args, **kwargs) -> None:
         pass
 
-def get_report():
+def get_report() -> Report | DummyReport:
     # just for convenience, only rank 0 logs to report
     from nanochat.common import get_base_dir, get_dist_info
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()

@@ -1,7 +1,8 @@
 """
-Loads a checkpoint, and:
-- Evaluates the loss on a larger chunk of train/val splits
-- Samples from the model
+Evaluate a base model checkpoint on train/val loss and sample completions.
+
+Loads a checkpoint, evaluates bits-per-byte on train/val splits,
+and generates sample completions from the model on the master process.
 
 Example run as:
 torchrun --standalone --nproc_per_node=8 -m scripts.base_loss
@@ -10,11 +11,12 @@ import os
 from contextlib import nullcontext
 import torch
 from nanochat.checkpoint_manager import load_model
-from nanochat.common import compute_init, print0, compute_cleanup, autodetect_device_type
+from nanochat.common import compute_init, print0, compute_cleanup, autodetect_device_type, get_base_dir
 from nanochat.dataloader import tokenizing_distributed_data_loader
-from nanochat.tokenizer import get_token_bytes
+from nanochat.tokenizer import get_token_bytes, get_tokenizer
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
+
 
 # Configuration
 device_batch_size = 32
@@ -22,12 +24,18 @@ split_tokens = 20*524288  # number of tokens to evaluate per split
 model_tag = None # optional model tag for the output directory name
 model_step = None # optional model step for the output directory name
 device_type = "" # cuda|cpu|mps (empty => autodetect)
+tokenizer_name = "tokenizer" # tokenizer directory name (relative to base_dir, default: "tokenizer")
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
 
 # Load the base model and the tokenizer
 device_type = autodetect_device_type() if device_type == "" else device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 model, tokenizer, meta = load_model("base", device, phase="eval", model_tag=model_tag, step=model_step)
+tokenizer_dir = os.path.join(get_base_dir(), tokenizer_name)
+tokenizer = get_tokenizer(tokenizer_dir)
+# Sanity check: compatibility between model and tokenizer
+assert tokenizer.get_vocab_size() == meta["model_config"]["vocab_size"], \
+    f"Tokenizer vocab size ({tokenizer.get_vocab_size()}) does not match model config vocab size ({meta['model_config']['vocab_size']})"
 sequence_len = meta["model_config"]["sequence_len"] # could be arbitrary really
 autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 
@@ -35,10 +43,11 @@ autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16)
 tokens_per_step = device_batch_size * sequence_len * ddp_world_size
 assert split_tokens % tokens_per_step == 0, "split_tokens must be divisible by tokens_per_step"
 steps = split_tokens // tokens_per_step
-token_bytes = get_token_bytes(device=device)
+
+token_bytes = get_token_bytes(device=device, tokenizer_path=tokenizer_dir)
 bpb_results = {}
 for split_name in ["train", "val"]:
-    loader = tokenizing_distributed_data_loader(device_batch_size, sequence_len, split_name, device=device)
+    loader = tokenizing_distributed_data_loader(device_batch_size, sequence_len, split_name, device=device, tokenizer_path=tokenizer_dir)
     with autocast_ctx:
         bpb = evaluate_bpb(model, loader, steps, token_bytes)
     print0(f"{split_name} bpb: {bpb:.4f}")

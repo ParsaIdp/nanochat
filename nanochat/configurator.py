@@ -3,6 +3,10 @@ Poor Man's Configurator. Probably a terrible idea. Example usage:
 $ python train.py config/override_file.py --batch_size=32
 this will first run config/override_file.py, then override batch_size to 32
 
+WARNING: This file is exec()'d into the caller's namespace, NOT imported as a
+normal module. That means it shares the caller's globals() and cannot use
+relative imports. Any helpers used here must be defined inline.
+
 The code in this file will be run as follows from e.g. train.py:
 >>> exec(open('configurator.py').read())
 
@@ -18,6 +22,7 @@ import os
 import sys
 from ast import literal_eval
 
+# Duplicated from common.py because this file is exec()'d, not imported.
 def print0(s="",**kwargs):
     ddp_rank = int(os.environ.get('RANK', 0))
     if ddp_rank == 0:

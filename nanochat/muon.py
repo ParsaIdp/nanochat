@@ -1,10 +1,15 @@
 """
-Muon optimizer from Keller et al.
-Also a lot of borrowing of ideas from modded-nanogpt.
+Muon optimizer for nanochat.
+
+Implements the Muon (MomentUm Orthogonalized by Newton-schulz) optimizer from
+Keller et al., with both single-process and distributed variants. Borrows ideas
+from modded-nanogpt.
 """
+from typing import Iterator
+
 import torch
-from torch import Tensor
 import torch.distributed as dist
+from torch import Tensor
 
 @torch.compile
 def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
@@ -57,17 +62,18 @@ class Muon(torch.optim.Optimizer):
         nesterov: Whether to use Nesterov-style momentum in the internal SGD. (recommended)
         ns_steps: The number of Newton-Schulz iteration steps to use.
     """
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5):
+    def __init__(self, params: Iterator[Tensor], lr: float = 0.02, momentum: float = 0.95,
+                 nesterov: bool = True, ns_steps: int = 5) -> None:
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
         params: list[Tensor] = [*params]
-        param_groups = []
+        param_groups: list[dict] = []
         for size in {p.numel() for p in params}:
             group = dict(params=[p for p in params if p.numel() == size])
             param_groups.append(group)
         super().__init__(param_groups, defaults)
 
     @torch.no_grad()
-    def step(self):
+    def step(self) -> None:
         for group in self.param_groups:
             params: list[Tensor] = group["params"]
             for p in params:
@@ -104,15 +110,15 @@ class DistMuon(torch.optim.Optimizer):
         nesterov: if True, Nesterov-style update (g <- lerp(g, buf, momentum)); else use buf
         ns_steps: number of Newton–Schulz iterations for the orthogonalization
     """
-    def __init__(self, params, lr: float = 0.02, momentum: float = 0.95,
-                 nesterov: bool = True, ns_steps: int = 5):
+    def __init__(self, params: Iterator[Tensor], lr: float = 0.02, momentum: float = 0.95,
+                 nesterov: bool = True, ns_steps: int = 5) -> None:
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
         params = list(params)
         assert all(p.ndim == 2 for p in params), "Muon expects 2D parameters only"
         rank = dist.get_rank()
         # Group all parameters by their shape
         shapes = sorted({p.shape for p in params}) # sort to ensure consistent / deterministic ordering
-        param_groups = []
+        param_groups: list[dict] = []
         for shape in shapes:
             group_params = [p for p in params if p.shape == shape]
             device, dtype = group_params[0].device, group_params[0].dtype
@@ -124,7 +130,7 @@ class DistMuon(torch.optim.Optimizer):
         super().__init__(param_groups, defaults)
 
     @torch.no_grad()
-    def step(self):
+    def step(self) -> None:
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 

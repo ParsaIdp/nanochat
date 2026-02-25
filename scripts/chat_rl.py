@@ -1,5 +1,4 @@
-"""
-Reinforcement learning on GSM8K via "GRPO".
+"""Reinforcement learning on GSM8K via "GRPO".
 
 I put GRPO in quotes because we actually end up with something a lot
 simpler and more similar to just REINFORCE:
@@ -15,6 +14,7 @@ python -m scripts.chat_rl
 8 GPUs:
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl -- --run=default
 """
+from __future__ import annotations
 
 import os
 import itertools
@@ -63,7 +63,7 @@ autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=dtype)
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl", name=run, config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl", name=run, config=user_config, entity="goodarzilab")
 
 # Init model and tokenizer
 model, tokenizer, meta = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
@@ -143,13 +143,13 @@ def get_batch():
 
 # -----------------------------------------------------------------------------
 # Simple evaluation loop for GSM8K pass@k
-def run_gsm8k_eval(task, tokenizer, engine,
-    max_examples=None,
-    num_samples=1,
-    max_completion_tokens=256,
-    temperature=0.0,
-    top_k=50
-):
+def run_gsm8k_eval(task: "GSM8K", tokenizer: object, engine: "Engine",
+    max_examples: int | None = None,
+    num_samples: int = 1,
+    max_completion_tokens: int = 256,
+    temperature: float = 0.0,
+    top_k: int = 50
+) -> "Generator[dict, None, None]":
     """
     Evaluates GSM8K task and returns a list of records of evaluation outcomes.
     In a distributed setting, all ranks cooperate but this function will NOT
@@ -204,7 +204,7 @@ for opt in optimizers:
         group["initial_lr"] = group["lr"] # save the initial learning so we can decay easily later
 
 # Learning rate scheduler: simple rampdown to zero over num_steps
-def get_lr_multiplier(it):
+def get_lr_multiplier(it: int) -> float:
     lrm = 1.0 - it / num_steps
     return lrm
 

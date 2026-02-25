@@ -70,7 +70,7 @@ autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if dev
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=run, config=user_config, save_code=True)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=run, config=user_config, save_code=True, entity="goodarzilab")
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
@@ -95,7 +95,7 @@ val_ds = SmolTalk(split="test") # general conversations, 24K rows (though we don
 # -----------------------------------------------------------------------------
 # DataLoader
 
-def sft_data_generator(dataset, batch_size):
+def sft_data_generator(dataset: "TaskMixture", batch_size: int) -> "Generator[tuple[torch.Tensor, torch.Tensor], None, None]":
     pad_token_id = tokenizer.encode_special("<|assistant_end|>") # use <|assistant_end|> as the pad token is ok, these positions are masked in the loss
     # prepares a list of tokenized conversations into a batch and yields
     def collate_and_yield(batch):
@@ -161,7 +161,7 @@ for opt in optimizers:
 # Training loop
 
 # Learning rate scheduler
-def get_lr_multiplier(it):
+def get_lr_multiplier(it: int) -> float:
     lrm = 1.0 - it / num_iterations
     return lrm
 

@@ -115,72 +115,81 @@ This includes all py, html, toml, sh files and chooses the cxml output format. E
 
 Alternatively, I recommend using [DeepWiki](https://deepwiki.com/karpathy/nanochat) from Devin/Cognition to ask questions of this repo. In the URL of this repo, simply change github.com to deepwiki.com, and you're off.
 
-## Tests
+## LZ78 Tokenizer Training
 
-I haven't invested too much here but some tests exist, especially for the tokenizer. Run e.g. as:
+nanochat also supports LZ78-family tokenizers as an alternative to BPE, powered by the [weezl](https://github.com/parsaidp/weezl) Rust library. Train a dictionary with one of 7 strategies:
 
 ```bash
-python -m pytest tests/test_engine.py -v -s
+# Train with frequency-gated eviction (best strategy)
+python scripts/lz78_tok_train.py --strategy frequency_gated --vocab_size 32000
+
+# Build compressed Patricia trie
+python scripts/lz78_tok_train.py --strategy compressed --vocab_size 32000 --compress
 ```
 
-## File structure
+See [docs/LZ78_TOKENIZER.md](docs/LZ78_TOKENIZER.md) for full documentation and [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) for ablation results comparing BPE vs LZ78 across 26 experiments.
 
+## Tests
+
+Run the test suite:
+
+```bash
+python -m pytest tests/ -v -s
 ```
-.
-├── LICENSE
-├── README.md
-├── dev
-│   ├── gen_synthetic_data.py       # Example synthetic data for identity
-│   ├── generate_logo.html
-│   ├── nanochat.png
-│   ├── repackage_data_reference.py # Pretraining data shard generation
-│   └── runcpu.sh                   # Small example of how to run on CPU/MPS
-├── nanochat
-│   ├── __init__.py                 # empty
-│   ├── adamw.py                    # Distributed AdamW optimizer
-│   ├── checkpoint_manager.py       # Save/Load model checkpoints
-│   ├── common.py                   # Misc small utilities, quality of life
-│   ├── configurator.py             # A superior alternative to argparse
-│   ├── core_eval.py                # Evaluates base model CORE score (DCLM paper)
-│   ├── dataloader.py               # Tokenizing Distributed Data Loader
-│   ├── dataset.py                  # Download/read utils for pretraining data
-│   ├── engine.py                   # Efficient model inference with KV Cache
-│   ├── execution.py                # Allows the LLM to execute Python code as tool
-│   ├── gpt.py                      # The GPT nn.Module Transformer
-│   ├── logo.svg
-│   ├── loss_eval.py                # Evaluate bits per byte (instead of loss)
-│   ├── muon.py                     # Distributed Muon optimizer
-│   ├── report.py                   # Utilities for writing the nanochat Report
-│   ├── tokenizer.py                # BPE Tokenizer wrapper in style of GPT-4
-│   └── ui.html                     # HTML/CSS/JS for nanochat frontend
-├── pyproject.toml
-├── run1000.sh                      # Train the ~$800 nanochat d32
-├── scripts
-│   ├── base_eval.py                # Base model: calculate CORE score
-│   ├── base_loss.py                # Base model: calculate bits per byte, sample
-│   ├── base_train.py               # Base model: train
-│   ├── chat_cli.py                 # Chat model (SFT/Mid): talk to over CLI
-│   ├── chat_eval.py                # Chat model (SFT/Mid): eval tasks
-│   ├── chat_rl.py                  # Chat model (SFT/Mid): reinforcement learning
-│   ├── chat_sft.py                 # Chat model: train SFT
-│   ├── chat_web.py                 # Chat model (SFT/Mid): talk to over WebUI
-│   ├── mid_train.py                # Chat model: midtraining
-│   ├── tok_eval.py                 # Tokenizer: evaluate compression rate
-│   └── tok_train.py                # Tokenizer: train it
-├── speedrun.sh                     # Train the ~$100 nanochat d20
-├── tasks
-│   ├── arc.py                      # Multiple choice science questions
-│   ├── common.py                   # TaskMixture | TaskSequence
-│   ├── customjson.py               # Make Task from arbitrary jsonl convos
-│   ├── gsm8k.py                    # 8K Grade School Math questions
-│   ├── humaneval.py                # Misnomer; Simple Python coding task
-│   ├── mmlu.py                     # Multiple choice questions, broad topics
-│   ├── smoltalk.py                 # Conglomerate dataset of SmolTalk from HF
-│   └── spellingbee.py              # Task teaching model to spell/count letters
-├── tests
-│   └── test_engine.py
-└── uv.lock
-```
+
+## Module Reference
+
+### Core Library (`nanochat/`)
+
+| Module | Description |
+|---|---|
+| `gpt.py` | GPT transformer architecture with GQA and RoPE |
+| `engine.py` | Inference engine with KV cache and tool use |
+| `tokenizer.py` | BPE tokenizers (CharLevel, HuggingFace, RustBPE) |
+| `lz78_tokenizer.py` | LZ78 trie-based tokenizer with byte fallback |
+| `lz78_trainer.py` | LZ78 dictionary training via weezl Rust lib |
+| `lz78_embedding.py` | Structured embedding strategies for LZ78 |
+| `lz78_dataloader.py` | Pre-tokenized data loading for LZ78 |
+| `prefix_loss.py` | Prefix-smooth cross entropy loss |
+| `dataloader.py` | Streaming tokenizing data loader |
+| `dataset.py` | FineWeb-Edu parquet dataset utilities |
+| `checkpoint_manager.py` | Model checkpoint save/load |
+| `adamw.py` | Distributed AdamW optimizer |
+| `muon.py` | Muon optimizer (attention/MLP) |
+| `common.py` | Utilities: logging, DDP setup, device detection |
+| `configurator.py` | CLI config override via exec() |
+| `core_eval.py` | CORE benchmark evaluation |
+| `loss_eval.py` | Bits-per-byte evaluation |
+| `execution.py` | Sandboxed Python execution for tool use |
+| `report.py` | Training report generation |
+
+### Scripts (`scripts/`)
+
+| Script | Description |
+|---|---|
+| `tok_train.py` | Train BPE tokenizer |
+| `tok_eval.py` | Evaluate tokenizer compression ratio |
+| `lz78_tok_train.py` | Train LZ78 tokenizer via weezl |
+| `lz78_setup_tokenizer.py` | Build LZ78Tokenizer from TSV |
+| `lz78_pretokenize.py` | Pre-tokenize data with LZ78 |
+| `bpe_generate_ancestors.py` | Generate BPE ancestor chains |
+| `base_train.py` | Pretrain base model |
+| `base_loss.py` | Evaluate base model BPB |
+| `base_eval.py` | Evaluate base model on CORE benchmark |
+| `mid_train.py` | Chat model midtraining |
+| `chat_sft.py` | Supervised finetuning |
+| `chat_rl.py` | Reinforcement learning (GRPO) |
+| `chat_eval.py` | Evaluate chat model |
+| `chat_cli.py` | CLI chat interface |
+| `chat_web.py` | Web UI chat interface |
+
+### Documentation (`docs/`)
+
+| Document | Description |
+|---|---|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Pipeline overview and module map |
+| [LZ78_TOKENIZER.md](docs/LZ78_TOKENIZER.md) | LZ78 training strategies and formats |
+| [EXPERIMENTS.md](docs/EXPERIMENTS.md) | 26-run tokenizer ablation results |
 
 ## Contributing
 

@@ -1,39 +1,63 @@
 """
-Engine for efficient inference of our models.
+Engine for efficient inference of nanochat models.
 
-Everything works around token sequences:
-- The user can send token sequences to the engine
-- The engine returns the next token
+Provides token-level generation with KV-cache management and optional tool use
+(calculator). The engine operates purely on token-id sequences and knows nothing
+about tokenization itself.
 
-Notes:
-- The engine knows nothing about tokenization, it's purely token id sequences.
-
-The whole thing is made as efficient as possible.
+Key components:
+    - KVCache: manages the key/value cache across transformer layers.
+    - Engine: drives autoregressive generation with batched sampling and
+      streaming output.
+    - Calculator helpers: sandboxed eval of simple math / string expressions
+      invoked via special tokens during generation.
 """
+
+import signal
+import warnings
+from collections import deque
+from contextlib import contextmanager, nullcontext
+from typing import Generator, Optional
 
 import torch
 import torch.nn.functional as F
-import signal
-import warnings
-from contextlib import contextmanager
-from collections import deque
-from nanochat.common import compute_init, autodetect_device_type
+
 from nanochat.checkpoint_manager import load_model
-from contextlib import nullcontext
+from nanochat.common import autodetect_device_type, compute_init
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers
+
+# Characters permitted in pure math expressions.
+MATH_CHARS: str = "0123456789*+-/.() "
+
+# Characters permitted in string-operation expressions (e.g. "abc".count("a")).
+ALLOWED_CHARS: str = (
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789'\"()._ "
+)
+
+# Substrings that must never appear in calculator expressions.
+DANGEROUS_PATTERNS: list[str] = [
+    "__", "import", "exec", "eval", "compile", "open", "file",
+    "input", "raw_input", "globals", "locals", "vars", "dir",
+    "getattr", "setattr", "delattr", "hasattr",
+]
+
+
 @contextmanager
-def timeout(duration, formula):
-    def timeout_handler(signum, frame):
+def timeout(duration: int, formula: str) -> Generator[None, None, None]:
+    def timeout_handler(signum: int, frame: object) -> None:
         raise Exception(f"'{formula}': timed out after {duration} seconds")
 
+    # NOTE: signal.SIGALRM is Unix-only; this will not work on Windows.
     signal.signal(signal.SIGALRM, timeout_handler)
     signal.alarm(duration)
     yield
     signal.alarm(0)
 
-def eval_with_timeout(formula, max_time=3):
+def eval_with_timeout(formula: str, max_time: int = 3) -> Optional[object]:
     try:
         with timeout(max_time, formula):
             with warnings.catch_warnings():
@@ -44,32 +68,29 @@ def eval_with_timeout(formula, max_time=3):
         # print(f"Warning: Failed to eval {formula}, exception: {e}") # it's ok ignore wrong calculator usage
         return None
 
-def use_calculator(expr):
-    """
-    Evaluate a Python expression safely.
-    Supports both math expressions and string operations like .count()
+def use_calculator(expr: str) -> Optional[object]:
+    """Evaluate a Python expression safely.
+
+    Supports pure math expressions and simple string operations like
+    ``"hello".count("l")``.  Returns ``None`` when the expression is
+    rejected or evaluation fails.
     """
     # Remove commas from numbers
     expr = expr.replace(",", "")
 
-    # Check if it's a pure math expression (old behavior)
-    if all([x in "0123456789*+-/.() " for x in expr]):
+    # Check if it's a pure math expression
+    if all(x in MATH_CHARS for x in expr):
         if "**" in expr:  # disallow power operator
             return None
         return eval_with_timeout(expr)
 
     # Check if it's a string operation we support
-    # Allow: strings (single/double quotes), .count(), letters, numbers, spaces, parens
-    allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'\"()._ "
-    if not all([x in allowed_chars for x in expr]):
+    if not all(x in ALLOWED_CHARS for x in expr):
         return None
 
     # Disallow dangerous patterns
-    dangerous_patterns = ['__', 'import', 'exec', 'eval', 'compile', 'open', 'file',
-                         'input', 'raw_input', 'globals', 'locals', 'vars', 'dir',
-                         'getattr', 'setattr', 'delattr', 'hasattr']
     expr_lower = expr.lower()
-    if any(pattern in expr_lower for pattern in dangerous_patterns):
+    if any(pattern in expr_lower for pattern in DANGEROUS_PATTERNS):
         return None
 
     # Only allow .count() method for now (can expand later)
@@ -86,19 +107,19 @@ class KVCache:
     Note that the .pos advances automatically after the last layer of the Transformer inserts.
     """
 
-    def __init__(self, batch_size, num_heads, seq_len, head_dim, num_layers):
+    def __init__(self, batch_size: int, num_heads: int, seq_len: int, head_dim: int, num_layers: int) -> None:
         # Each of K/V is of shape (B, H, T, D) and we have one per layer of the Transformer.
-        self.kv_shape = (num_layers, 2, batch_size, num_heads, seq_len, head_dim)
-        self.kv_cache = None
-        self.pos = 0 # current position in time in the cache
+        self.kv_shape: tuple[int, ...] = (num_layers, 2, batch_size, num_heads, seq_len, head_dim)
+        self.kv_cache: Optional[torch.Tensor] = None
+        self.pos: int = 0  # current position in time in the cache
 
-    def reset(self):
+    def reset(self) -> None:
         self.pos = 0
 
-    def get_pos(self):
+    def get_pos(self) -> int:
         return self.pos
 
-    def prefill(self, other):
+    def prefill(self, other: "KVCache") -> None:
         """
         Prefill given another KV cache. Optionally expand along batch dim.
         This is used when we do batch 1 prefill and then want to generate
@@ -132,7 +153,7 @@ class KVCache:
         # 4) update the pos
         self.pos = other.pos
 
-    def insert_kv(self, layer_idx, k, v):
+    def insert_kv(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # Lazy initialize the cache here because we need to know the dtype/device
         if self.kv_cache is None:
             self.kv_cache = torch.empty(self.kv_shape, dtype=k.dtype, device=k.device)
@@ -162,7 +183,7 @@ class KVCache:
 
 # -----------------------------------------------------------------------------
 @torch.inference_mode()
-def sample_next_token(logits, rng, temperature=1.0, top_k=None):
+def sample_next_token(logits: torch.Tensor, rng: torch.Generator, temperature: float = 1.0, top_k: Optional[int] = None) -> torch.Tensor:
     """Sample a single next token from given logits of shape (B, vocab_size). Returns (B, 1)."""
     assert temperature >= 0.0, "temperature must be non-negative"
     if temperature == 0.0:
@@ -182,35 +203,53 @@ def sample_next_token(logits, rng, temperature=1.0, top_k=None):
 # -----------------------------------------------------------------------------
 
 class RowState:
-    # Per-row state tracking during generation
-    def __init__(self, current_tokens=None):
-        self.current_tokens = current_tokens or [] # Current token sequence for this row
-        self.forced_tokens = deque() # Queue of tokens to force inject
-        self.in_python_block = False # Whether we are inside a python block
-        self.python_expr_tokens = [] # Tokens of the current python expression
-        self.completed = False # Whether this row has completed generation
+    """Per-row state tracking during generation."""
+
+    def __init__(self, current_tokens: Optional[list[int]] = None) -> None:
+        self.current_tokens: list[int] = current_tokens or []
+        self.forced_tokens: deque[int] = deque()
+        self.in_python_block: bool = False
+        self.python_expr_tokens: list[int] = []
+        self.completed: bool = False
 
 class Engine:
 
-    def __init__(self, model, tokenizer):
+    def __init__(self, model: object, tokenizer: object) -> None:
         self.model = model
-        self.tokenizer = tokenizer # needed for tool use
+        self.tokenizer = tokenizer
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
-        """Same as generate, but does single prefill and then clones the KV cache."""
+    def generate(
+        self,
+        tokens: list[int],
+        num_samples: int = 1,
+        max_tokens: Optional[int] = None,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        seed: int = 42,
+    ) -> Generator[tuple[list[int], list[int]], None, None]:
+        """Run autoregressive generation with batched sampling.
+
+        Performs a single batch-1 prefill of the prompt, clones the KV cache
+        across ``num_samples`` rows, then streams ``(token_column, token_masks)``
+        tuples on each step.
+        """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
         rng = torch.Generator(device=device)
         rng.manual_seed(seed)
 
         # Get the special tokens we need to coordinate the tool use state machine
-        get_special = lambda s: self.tokenizer.encode_special(s)
+        def get_special(s):
+            try:
+                return self.tokenizer.encode_special(s)
+            except (ValueError, KeyError):
+                return None  # token not in this tokenizer's vocabulary
         python_start = get_special("<|python_start|>")
         python_end = get_special("<|python_end|>")
         output_start = get_special("<|output_start|>")
         output_end = get_special("<|output_end|>")
-        assistant_end = get_special("<|assistant_end|>") # if sampled, ends row
+        assistant_end = get_special("<|assistant_end|>") or get_special("<|eos|>")  # fallback for LZ78
         bos = self.tokenizer.get_bos_token_id() # if sampled, ends row
 
         # 1) Run a batch 1 prefill of the prompt tokens
@@ -292,13 +331,22 @@ class Engine:
             ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
             logits = self.model.forward(ids, kv_cache=kv_cache_decode)[:, -1, :]  # (B, vocab_size)
 
-    def generate_batch(self, tokens, num_samples=1, **kwargs):
+    def generate_batch(
+        self, tokens: list[int], num_samples: int = 1, **kwargs: object
+    ) -> tuple[list[list[int]], list[list[int]]]:
+        """Run non-streaming batch generation and return final token sequences.
+
+        Returns ``(results, masks)`` where each entry is a list of token-id
+        lists.  Terminal tokens (assistant_end, bos) are excluded from results.
         """
-        Non-streaming batch generation that just returns the final token sequences.
-        Returns a list of token sequences (list of lists of ints).
-        Terminal tokens (assistant_end, bos) are not included in the results.
-        """
-        assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
+        # Use <|assistant_end|> if available, fall back to <|eos|>
+        try:
+            assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
+        except (ValueError, KeyError):
+            try:
+                assistant_end = self.tokenizer.encode_special("<|eos|>")
+            except (ValueError, KeyError):
+                assistant_end = None
         bos = self.tokenizer.get_bos_token_id()
         results = [tokens.copy() for _ in range(num_samples)]
         masks = [[0] * len(tokens) for _ in range(num_samples)]

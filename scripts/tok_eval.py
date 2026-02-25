@@ -1,6 +1,10 @@
 """
 Evaluate compression ratio of the tokenizer.
+
+Compares our trained tokenizer against GPT-2 and GPT-4 tokenizers
+on a variety of text domains (news, Korean, code, math, science, FineWeb).
 """
+from __future__ import annotations
 
 from nanochat.tokenizer import get_tokenizer, RustBPETokenizer
 from nanochat.dataset import parquets_iter_batched
@@ -200,7 +204,7 @@ print(f"GPT-2: {vocab_sizes['gpt2']}")
 print(f"GPT-4: {vocab_sizes['gpt4']}")
 print(f"Ours: {vocab_sizes['ours']}")
 
-def print_comparison(baseline_name, baseline_results, ours_results, all_text):
+def print_comparison(baseline_name: str, baseline_results: dict, ours_results: dict, all_text: list[tuple[str, str]]) -> None:
     """Print comparison table between baseline tokenizer and ours."""
     print(f"\nComparison with {baseline_name}:")
     print("=" * 95)

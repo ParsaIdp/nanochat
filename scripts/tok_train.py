@@ -2,10 +2,15 @@
 Train a tokenizer using our own BPE Tokenizer library.
 In the style of GPT-4 tokenizer.
 """
+from __future__ import annotations
+
+import logging
 import os
 import time
 import argparse
 import torch
+
+logger = logging.getLogger(__name__)
 from nanochat.tokenizer import RustBPETokenizer
 from nanochat.common import get_base_dir
 from nanochat.dataset import parquets_iter_batched
@@ -17,15 +22,17 @@ parser = argparse.ArgumentParser(description='Train a BPE tokenizer')
 parser.add_argument('--max_chars', type=int, default=10_000_000_000, help='Maximum characters to train on (default: 10B)')
 parser.add_argument('--doc_cap', type=int, default=10_000, help='Maximum characters per document (default: 10,000)')
 parser.add_argument('--vocab_size', type=int, default=65536, help='Vocabulary size (default: 65536 = 2^16)')
+parser.add_argument('--tokenizer_dir', type=str, default="tokenizer", help='Directory to save the tokenizer (default: tokenizer)')
+parser.add_argument('--no_chunking', action='store_true', help='Disable GPT-4 regex chunking (train BPE on raw bytes)')
 args = parser.parse_args()
-print(f"max_chars: {args.max_chars:,}")
-print(f"doc_cap: {args.doc_cap:,}")
-print(f"vocab_size: {args.vocab_size:,}")
-
+logger.info(f"max_chars: {args.max_chars:,}")
+logger.info(f"doc_cap: {args.doc_cap:,}")
+logger.info(f"vocab_size: {args.vocab_size:,}")
+logger.info(f"tokenizer_dir: {args.tokenizer_dir}")
 # -----------------------------------------------------------------------------
 # Text iterator
 
-def text_iterator():
+def text_iterator() -> "Generator[str, None, None]":
     """
     1) Flatten the batches into a single iterator
     2) Crop every document to args.doc_cap characters
@@ -46,15 +53,19 @@ text_iter = text_iterator()
 # -----------------------------------------------------------------------------
 # Train the tokenizer
 t0 = time.time()
-tokenizer = RustBPETokenizer.train_from_iterator(text_iter, args.vocab_size)
+train_kwargs = {}
+if args.no_chunking:
+    logger.info("Training BPE WITHOUT regex chunking (raw bytes)")
+    train_kwargs["pattern"] = r"[\s\S]+"
+tokenizer = RustBPETokenizer.train_from_iterator(text_iter, args.vocab_size, **train_kwargs)
 t1 = time.time()
 train_time = t1 - t0
-print(f"Training time: {train_time:.2f}s")
+logger.info(f"Training time: {train_time:.2f}s")
 
 # -----------------------------------------------------------------------------
 # Save the tokenizer to disk
 base_dir = get_base_dir()
-tokenizer_dir = os.path.join(base_dir, "tokenizer")
+tokenizer_dir = os.path.join(base_dir, args.tokenizer_dir)
 tokenizer.save(tokenizer_dir)
 
 # -----------------------------------------------------------------------------
@@ -88,7 +99,7 @@ token_bytes = torch.tensor(token_bytes, dtype=torch.int32, device='cpu')
 token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
 with open(token_bytes_path, "wb") as f:
     torch.save(token_bytes, f)
-print(f"Saved token_bytes to {token_bytes_path}")
+logger.info(f"Saved token_bytes to {token_bytes_path}")
 
 # Log to report
 from nanochat.report import get_report

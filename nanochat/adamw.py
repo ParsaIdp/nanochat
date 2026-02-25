@@ -12,13 +12,13 @@ class DistAdamW(torch.optim.Optimizer):
     Distributed AdamW optimizer.
     In the style of ZeRO-2, i.e. sharded optimizer states and gradient reduction
     """
-    def __init__(self, param_groups, lr: float = 1e-3, betas: tuple[float, float] = (0.9, 0.999), eps: float = 1e-8, weight_decay: float = 0.01):
+    def __init__(self, param_groups: list[dict], lr: float = 1e-3, betas: tuple[float, float] = (0.9, 0.999), eps: float = 1e-8, weight_decay: float = 0.01) -> None:
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(param_groups, defaults)
 
     @torch.compile
     @torch.no_grad()
-    def step(self):
+    def step(self) -> None:
         rank = dist.get_rank()
         world_size = dist.get_world_size()
         reduce_scatter_futures: list[torch.Future] = []

@@ -4,24 +4,25 @@ https://huggingface.co/datasets/allenai/ai2_arc
 """
 
 from datasets import load_dataset
-from tasks.common import Task, render_mc
+from tasks.common import Conversation, Task, render_mc
 
 class ARC(Task):
+    """ARC (AI2 Reasoning Challenge) multiple-choice science question task."""
 
-    def __init__(self, subset, split, **kwargs):
+    def __init__(self, subset: str, split: str, **kwargs) -> None:
         super().__init__(**kwargs)
         assert subset in ["ARC-Easy", "ARC-Challenge"], "ARC subset must be ARC-Easy or ARC-Challenge"
         assert split in ["train", "validation", "test"], "ARC split must be train|validation|test"
         self.ds = load_dataset("allenai/ai2_arc", subset, split=split).shuffle(seed=42)
 
     @property
-    def eval_type(self):
+    def eval_type(self) -> str:
         return 'categorical'
 
-    def num_examples(self):
+    def num_examples(self) -> int:
         return len(self.ds)
 
-    def get_example(self, index):
+    def get_example(self, index: int) -> Conversation:
         row = self.ds[index]
         question = row["question"] # the question text
         choices = row["choices"]["text"] # the text of each choice
@@ -40,7 +41,7 @@ class ARC(Task):
         }
         return conversation
 
-    def evaluate(self, conversation, assistant_response):
+    def evaluate(self, conversation: Conversation, assistant_response: str) -> bool:
         # the assert here is not strictly speaking needed, but currently the way we eval, we expect this to be true
         # I'm going to leave the assert here to prevent footguns, but possibly in the future can remove it.
         assert assistant_response in conversation['letters'], f"ARC answer {assistant_response} is expected to be one of {conversation['letters']}"

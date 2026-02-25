@@ -23,7 +23,7 @@ from contextlib import nullcontext
 import torch
 
 from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type, download_file_with_lock
-from nanochat.tokenizer import HuggingFaceTokenizer
+from nanochat.tokenizer import HuggingFaceTokenizer, get_tokenizer
 from nanochat.checkpoint_manager import load_model
 from nanochat.core_eval import evaluate_task
 
@@ -33,7 +33,7 @@ from nanochat.core_eval import evaluate_task
 # ~162MB of data needed to evaluate the CORE metric
 EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
 
-def place_eval_bundle(file_path):
+def place_eval_bundle(file_path: str) -> None:
     # here file_path is the path to the eval_bundle.zip file
     # we need to unzip it and place it in the base directory
     base_dir = get_base_dir()
@@ -45,7 +45,7 @@ def place_eval_bundle(file_path):
         shutil.move(extracted_bundle_dir, eval_bundle_dir)
     print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
 
-def evaluate_model(model, tokenizer, device, max_per_task=-1):
+def evaluate_model(model: "GPT", tokenizer: object, device: "torch.device", max_per_task: int = -1) -> dict:
     """
     Evaluate a base model on the CORE benchmark.
     - max_per_task: crop the data to this many examples per task for testing (-1 = disable)
@@ -130,7 +130,7 @@ class ModelWrapper:
         logits = outputs.logits
         return logits
 
-def load_hf_model(hf_path: str, device):
+def load_hf_model(hf_path: str, device: "torch.device") -> tuple:
     print0(f"Loading model from: {hf_path}")
     # Load the model
     from transformers import AutoModelForCausalLM
@@ -144,13 +144,14 @@ def load_hf_model(hf_path: str, device):
     return model, tokenizer
 
 # -----------------------------------------------------------------------------
-def main():
+def main() -> None:
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--hf-path', type=str, default=None, help='HuggingFace model path to evaluate')
     parser.add_argument('--max-per-task', type=int, default=-1, help='Max examples per task to evaluate (-1 = disable)')
     parser.add_argument('--model-tag', type=str, default=None, help='optional model tag for the output directory name')
     parser.add_argument('--step', type=str, default=None, help='optional model step for the output directory name')
+    parser.add_argument('--tokenizer-name', type=str, default="tokenizer-big", help='tokenizer name (default: tokenizer-big)')
     args = parser.parse_args()
 
     # distributed / precision setup
@@ -169,6 +170,12 @@ def main():
     else:
         # load a local model from the file system
         model, tokenizer, meta = load_model("base", device, phase="eval", model_tag=args.model_tag, step=args.step)
+        if args.tokenizer_name is not None:
+            tokenizer_dir = os.path.join(get_base_dir(), args.tokenizer_name)
+            tokenizer = get_tokenizer(tokenizer_dir)
+            # Sanity check: compatibility between model and tokenizer
+            assert tokenizer.get_vocab_size() == meta["model_config"]["vocab_size"], \
+                f"Tokenizer vocab size ({tokenizer.get_vocab_size()}) does not match model config vocab size ({meta['model_config']['vocab_size']})"
         model_name = f"base_model (step {meta['step']})" # just for logging
         model_slug = f"base_model_{meta['step']:06d}" # for the output csv file
 

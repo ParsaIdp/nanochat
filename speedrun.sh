@@ -10,9 +10,9 @@
 # 3) Example launch with wandb logging, but see below for setting up wandb first:
 # WANDB_RUN=speedrun screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
 
-# Default intermediate artifacts directory is in ~/.cache/nanochat
+# Default intermediate artifacts directory
 export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
+export NANOCHAT_BASE_DIR="/large_storage/goodarzilab/parsaidp/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
 
 # -----------------------------------------------------------------------------

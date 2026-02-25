@@ -16,11 +16,11 @@ from nanochat.common import setup_default_logging
 # Set up logging
 setup_default_logging()
 logger = logging.getLogger(__name__)
-def log0(message):
+def log0(message: str) -> None:
     if int(os.environ.get('RANK', 0)) == 0:
         logger.info(message)
 
-def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
+def save_checkpoint(checkpoint_dir: str, step: int, model_data: dict, optimizer_data: dict | None, meta_data: dict, rank: int = 0) -> None:
     if rank == 0:
         os.makedirs(checkpoint_dir, exist_ok=True)
         # Save the model state parameters
@@ -39,15 +39,21 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         torch.save(optimizer_data, optimizer_path)
         logger.info(f"Saved optimizer state to: {optimizer_path}")
 
-def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
+def load_checkpoint(checkpoint_dir: str, step: int, device: torch.device, load_optimizer: bool = False, rank: int = 0) -> tuple[dict, dict | None, dict]:
     # Load the model state
     model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
-    model_data = torch.load(model_path, map_location=device)
+    try:
+        model_data = torch.load(model_path, map_location=device, weights_only=True)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model checkpoint from {model_path}: {e}") from e
     # Load the optimizer state if requested
     optimizer_data = None
     if load_optimizer:
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
-        optimizer_data = torch.load(optimizer_path, map_location=device)
+        try:
+            optimizer_data = torch.load(optimizer_path, map_location=device, weights_only=True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load optimizer checkpoint from {optimizer_path}: {e}") from e
     # Load the metadata
     meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
     with open(meta_path, "r", encoding="utf-8") as f:
@@ -55,7 +61,7 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
     return model_data, optimizer_data, meta_data
 
 
-def build_model(checkpoint_dir, step, device, phase):
+def build_model(checkpoint_dir: str, step: int, device: torch.device, phase: str) -> tuple[GPT, object, dict]:
     """
     A bunch of repetitive code to build a model from a given checkpoint.
     Returns:
@@ -94,7 +100,7 @@ def build_model(checkpoint_dir, step, device, phase):
     return model, tokenizer, meta_data
 
 
-def find_largest_model(checkpoints_dir):
+def find_largest_model(checkpoints_dir: str) -> str:
     # attempt to guess the model tag: take the biggest model available
     model_tags = [f for f in os.listdir(checkpoints_dir) if os.path.isdir(os.path.join(checkpoints_dir, f))]
     if not model_tags:
@@ -114,7 +120,7 @@ def find_largest_model(checkpoints_dir):
     return model_tags[0]
 
 
-def find_last_step(checkpoint_dir):
+def find_last_step(checkpoint_dir: str) -> int:
     # Look into checkpoint_dir and find model_<step>.pt with the highest step
     checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "model_*.pt"))
     if not checkpoint_files:
@@ -125,7 +131,7 @@ def find_last_step(checkpoint_dir):
 # -----------------------------------------------------------------------------
 # convenience functions that take into account nanochat's directory structure
 
-def load_model_from_dir(checkpoints_dir, device, phase, model_tag=None, step=None):
+def load_model_from_dir(checkpoints_dir: str, device: torch.device, phase: str, model_tag: str | None = None, step: int | None = None) -> tuple[GPT, object, dict]:
     if model_tag is None:
         # guess the model tag by defaulting to the largest model
         model_tag = find_largest_model(checkpoints_dir)
@@ -140,7 +146,7 @@ def load_model_from_dir(checkpoints_dir, device, phase, model_tag=None, step=Non
     model, tokenizer, meta_data = build_model(checkpoint_dir, step, device, phase)
     return model, tokenizer, meta_data
 
-def load_model(source, *args, **kwargs):
+def load_model(source: str, *args, **kwargs) -> tuple[GPT, object, dict]:
     model_dir = {
         "base": "base_checkpoints",
         "mid": "mid_checkpoints",

@@ -1,5 +1,4 @@
-"""
-Evaluate the Chat model.
+"""Evaluate the Chat model.
 All the generic code lives here, and all the evaluation-specific
 code lives in nanochat directory and is imported from here.
 
@@ -7,6 +6,7 @@ Example runs:
 python -m scripts.chat_eval -a ARC-Easy
 torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
 """
+from __future__ import annotations
 
 import argparse
 from functools import partial
@@ -28,7 +28,7 @@ from tasks.spellingbee import SpellingBee
 # -----------------------------------------------------------------------------
 # Generative evaluation loop (we go one problem at a time, sample, evaluate)
 
-def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=None):
+def run_generative_eval(task_object: object, tokenizer: object, model: object, engine: "Engine", num_samples: int, max_new_tokens: int, temperature: float, top_k: int, max_problems: int | None = None) -> float:
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -87,7 +87,7 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
 # A lot easier because we don't have to sample. Therefore, we can actually go
 # batches at a time and just check the logits for correct answer choices.
 
-def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=None):
+def run_categorical_eval(task_object: object, tokenizer: object, model: object, batch_size: int, max_problems: int | None = None) -> float:
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -156,9 +156,9 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
 
 # -----------------------------------------------------------------------------
 
-def run_chat_eval(task_name, model, tokenizer, engine,
-                   batch_size=1, num_samples=1, max_new_tokens=512, temperature=0.0, top_k=50,
-                   max_problems=None):
+def run_chat_eval(task_name: str, model: object, tokenizer: object, engine: "Engine",
+                   batch_size: int = 1, num_samples: int = 1, max_new_tokens: int = 512, temperature: float = 0.0, top_k: int = 50,
+                   max_problems: int | None = None) -> float:
     # Create the evaluation object
     task_module = {
         'HumanEval': HumanEval,

@@ -62,11 +62,23 @@ sample_every = 2000 # every how many steps to sample from the model
 save_every = -1 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
 # Output
 model_tag = "" # optionally override the model tag for the output checkpoint directory name
+# Tokenizer
+tokenizer_name = "tokenizer" # tokenizer directory name (relative to base_dir, default: "tokenizer")
+tokenizer_type = "rustbpe" # "rustbpe" or "lz78"
+tokenizer_dir = "" # path to saved LZ78 tokenizer directory (only used when tokenizer_type=lz78)
+embedding_mode = "flat" # "flat", "structured", "hierarchical", or "tuple"
+data_mode = "online" # "online" (tokenize on the fly) or "pretokenized" (read .npy shards)
+pretokenized_dir = "" # path to directory with pretokenized .npy shards
+# Loss
+loss_mode = "standard" # "standard" or "prefix_smooth"
+prefix_weight = 1.0 # weight for prefix ancestors in prefix_smooth mode (exact token always 1.0)
+use_chunking = "" # "" = default (no override), "chunked" or "unchunked" to override tokenizer chunking
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
+
 
 # Compute init
 device_type = autodetect_device_type() if device_type == "" else device_type
@@ -78,13 +90,37 @@ get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else l
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=run, config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=run, config=user_config, entity="goodarzilab")
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
-tokenizer = get_tokenizer()
-token_bytes = get_token_bytes(device=device)
+base_dir = get_base_dir()
+if tokenizer_type == "lz78":
+    assert tokenizer_dir, "Must specify --tokenizer_dir for lz78 tokenizer"
+    from nanochat.lz78_tokenizer import LZ78Tokenizer
+    tokenizer = LZ78Tokenizer.from_directory(tokenizer_dir)
+    token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
+    token_bytes = torch.load(token_bytes_path, map_location=device)
+else:
+    if not tokenizer_dir:
+        tokenizer_dir = os.path.join(base_dir, tokenizer_name)
+    tokenizer = get_tokenizer(tokenizer_path=tokenizer_dir)
+    token_bytes = get_token_bytes(device=device, tokenizer_path=tokenizer_dir)
+if use_chunking:
+    tokenizer.set_chunking(use_chunking == "chunked")
+    print0(f"Chunking override: {use_chunking}")
 vocab_size = tokenizer.get_vocab_size()
 print0(f"Vocab size: {vocab_size:,}")
+
+# Load prefix loss data if needed
+prefix_ancestor_indices = None
+prefix_ancestor_depths = None
+if loss_mode == "prefix_smooth":
+    anc_path = os.path.join(tokenizer_dir, "token_ancestors.pt")
+    dep_path = os.path.join(tokenizer_dir, "token_ancestor_depths.pt")
+    assert os.path.exists(anc_path), f"token_ancestors.pt not found at {anc_path}. Run bpe_generate_ancestors.py or lz78_setup_tokenizer.py."
+    prefix_ancestor_indices = torch.load(anc_path, map_location=device)
+    prefix_ancestor_depths = torch.load(dep_path, map_location=device)
+    print0(f"Prefix smooth CE: prefix_weight={prefix_weight}, max_depth={prefix_ancestor_indices.shape[1]}")
 
 # Model kwargs are derived from the desired depth of the model
 num_layers = depth
@@ -110,7 +146,18 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 # Initialize the Model
 
 # Create a new model with random weights
-model_config_kwargs = dict(sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim)
+# Resolve token_metadata_path for structured/hierarchical embedding
+token_metadata_path = ""
+if embedding_mode != "flat" and tokenizer_type == "lz78":
+    if embedding_mode == "hierarchical":
+        token_metadata_path = os.path.join(tokenizer_dir, "token_metadata_hier.pt")
+        if not os.path.exists(token_metadata_path):
+            # Fall back to structured metadata
+            token_metadata_path = os.path.join(tokenizer_dir, "token_metadata.pt")
+    else:
+        token_metadata_path = os.path.join(tokenizer_dir, "token_metadata.pt")
+    print0(f"Using {embedding_mode} embedding with metadata: {token_metadata_path}")
+model_config_kwargs = dict(sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim, embedding_mode=embedding_mode, token_metadata_path=token_metadata_path)
 with torch.device("meta"):
     # All tensors are created as meta tensors (they have shape/dtype but no data)
     model_config = GPTConfig(**model_config_kwargs)
@@ -119,7 +166,6 @@ model.to_empty(device=device) # All tensors get storage on target device but wit
 model.init_weights() # All tensors get initialized
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
-base_dir = get_base_dir()
 output_dirname = model_tag if model_tag else f"d{depth}" # e.g. d12
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
 resuming = resume_from_step != -1
@@ -168,17 +214,22 @@ if resuming:
 
 # -----------------------------------------------------------------------------
 # Initialize the DataLoaders for train/val
-tokens_dir = os.path.join(base_dir, "tokenized_data")
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
-train_loader = tokenizing_distributed_data_loader_with_state(device_batch_size, max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
-build_val_loader = lambda: tokenizing_distributed_data_loader(device_batch_size, max_seq_len, split="val", device=device)
+if data_mode == "pretokenized":
+    assert pretokenized_dir, "Must specify --pretokenized_dir for pretokenized data mode"
+    from nanochat.lz78_dataloader import pretokenized_data_loader_with_state, pretokenized_data_loader
+    train_loader = pretokenized_data_loader_with_state(device_batch_size, max_seq_len, split="train", pretokenized_dir=pretokenized_dir, device=device, resume_state_dict=dataloader_resume_state_dict)
+    build_val_loader = lambda: pretokenized_data_loader(device_batch_size, max_seq_len, split="val", pretokenized_dir=pretokenized_dir, device=device)
+else:
+    train_loader = tokenizing_distributed_data_loader_with_state(device_batch_size, max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict, tokenizer_path=tokenizer_dir)
+    build_val_loader = lambda: tokenizing_distributed_data_loader(device_batch_size, max_seq_len, split="val", device=device, tokenizer_path=tokenizer_dir)
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 
 # -----------------------------------------------------------------------------
 # Set up hyperparameter schedulers
 
 # Learning rate scheduler
-def get_lr_multiplier(it):
+def get_lr_multiplier(it: int) -> float:
     warmup_iters = round(warmup_ratio * num_iterations)
     warmdown_iters = round(warmdown_ratio * num_iterations)
     if it < warmup_iters:
@@ -190,7 +241,7 @@ def get_lr_multiplier(it):
         return progress * 1.0 + (1 - progress) * final_lr_frac
 
 # Momentum scheduler for Muon optimizer
-def get_muon_momentum(it):
+def get_muon_momentum(it: int) -> float:
     frac = min(it / 300, 1)
     momentum = (1 - frac) * 0.85 + frac * 0.95
     return momentum
@@ -251,26 +302,15 @@ while True:
         })
         model.train()
 
-    # once in a while: sample from the model (only on master process)
-    # use the original uncompiled model because the inputs keep changing shape
-    if master_process and (last_step or (step > 0 and step % sample_every == 0)):
-        model.eval()
-        prompts = [
-            "The capital of France is",
-            "The chemical symbol of gold is",
-            "If yesterday was Friday, then tomorrow will be",
-            "The opposite of hot is",
-            "The planets of the solar system are:",
-            "My favorite color is",
-            "If 5*x + 3 = 13, then x is",
-        ]
-        engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
-        for prompt in prompts:
-            tokens = tokenizer(prompt, prepend="<|bos|>")
-            with autocast_ctx:
-                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-            print0(tokenizer.decode(sample[0]))
-        model.train()
+    # generation disabled: LZ78 tokenizers lack chat special tokens needed by engine.py
+    # if master_process and (last_step or (step > 0 and step % sample_every == 0)):
+    #     model.eval()
+    #     engine = Engine(orig_model, tokenizer)
+    #     for prompt in ["The capital of France is", ...]:
+    #         tokens = tokenizer(prompt, prepend="<|bos|>")
+    #         sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
+    #         print0(tokenizer.decode(sample[0]))
+    #     model.train()
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
     if last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0):
@@ -307,7 +347,12 @@ while True:
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
-            loss = model(x, y)
+            if loss_mode == "prefix_smooth":
+                from nanochat.prefix_loss import prefix_smooth_ce
+                logits = model(x)  # returns logits (B, T, V)
+                loss = prefix_smooth_ce(logits, y, prefix_ancestor_indices, prefix_ancestor_depths, prefix_weight=prefix_weight)
+            else:
+                loss = model(x, y)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()

@@ -28,7 +28,7 @@ python -m tasks.spellingbee
 
 import re
 import random
-from tasks.common import Task
+from tasks.common import Conversation, Task
 from nanochat.common import download_file_with_lock
 
 # Letters of the alphabet
@@ -40,7 +40,7 @@ TEST_RANDOM_SEED_OFFSET = 10_000_000
 
 # Identical to gsm8k's answer extraction
 ANSWER_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
-def extract_answer(completion):
+def extract_answer(completion: str) -> str | None:
     """
     Extract the numerical answer after #### marker.
     """
@@ -113,8 +113,9 @@ USER_MSG_TEMPLATES = [
 ]
 
 class SpellingBee(Task):
+    """Letter-counting task: count occurrences of a letter in a word, using manual counting and Python verification."""
 
-    def __init__(self, size=1000, split="train", **kwargs):
+    def __init__(self, size: int = 1000, split: str = "train", **kwargs) -> None:
         super().__init__(**kwargs)
         assert split in ["train", "test"], "SpellingBee split must be train|test"
         self.size = size
@@ -126,13 +127,13 @@ class SpellingBee(Task):
         self.words = words
 
     @property
-    def eval_type(self):
+    def eval_type(self) -> str:
         return 'generative'
 
-    def num_examples(self):
+    def num_examples(self) -> int:
         return self.size
 
-    def get_example(self, index):
+    def get_example(self, index: int) -> Conversation:
         seed = index if self.split == 'train' else TEST_RANDOM_SEED_OFFSET + index
         rng = random.Random(seed)
 
@@ -204,9 +205,9 @@ Then count the occurrences of '{letter}':
         }
         return conversation
 
-    def evaluate(self, conversation, assistant_response):
+    def evaluate(self, conversation: Conversation, assistant_response: str) -> int:
         """
-        Given (conversation, completion), return evaluation outcome (0 = wrong, 1 = correct)
+        Given (conversation, completion), return evaluation outcome (0 = wrong, 1 = correct).
         Identical to gsm8k's evaluation.
         """
         assert isinstance(assistant_response, str), "Assuming simple string response for now"
@@ -223,8 +224,8 @@ Then count the occurrences of '{letter}':
         is_correct = int(pred_num == ref_num)
         return is_correct
 
-    def reward(self, conversation, assistant_response):
-        """ Use simple 0-1 reward just like gsm8k."""
+    def reward(self, conversation: Conversation, assistant_response: str) -> float:
+        """Use simple 0-1 reward just like gsm8k."""
         is_correct = self.evaluate(conversation, assistant_response)
         is_correct_float = float(is_correct)
         return is_correct_float
@@ -233,7 +234,7 @@ Then count the occurrences of '{letter}':
 class SimpleSpelling(Task):
     """Much simpler task designed to get the model to just practice spelling words."""
 
-    def __init__(self, size=1000, split="train", **kwargs):
+    def __init__(self, size: int = 1000, split: str = "train", **kwargs) -> None:
         super().__init__(**kwargs)
         assert split in ["train", "test"], "SpellingBee split must be train|test"
         self.size = size
@@ -247,13 +248,13 @@ class SimpleSpelling(Task):
         self.words = words
 
     @property
-    def eval_type(self):
+    def eval_type(self) -> str:
         return 'generative'
 
-    def num_examples(self):
+    def num_examples(self) -> int:
         return self.size
 
-    def get_example(self, index):
+    def get_example(self, index: int) -> Conversation:
         seed = index if self.split == 'train' else TEST_RANDOM_SEED_OFFSET + index
         rng = random.Random(seed)
         # pick a random word
