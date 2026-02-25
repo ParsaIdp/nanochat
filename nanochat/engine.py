@@ -221,20 +221,25 @@ class Engine:
     @torch.inference_mode()
     def generate(
         self,
-        tokens: list[int],
+        tokens: list[int] | None = None,
         num_samples: int = 1,
         max_tokens: Optional[int] = None,
         temperature: float = 1.0,
         top_k: Optional[int] = None,
         seed: int = 42,
+        input_embeds: Optional[torch.Tensor] = None,
     ) -> Generator[tuple[list[int], list[int]], None, None]:
         """Run autoregressive generation with batched sampling.
 
         Performs a single batch-1 prefill of the prompt, clones the KV cache
         across ``num_samples`` rows, then streams ``(token_column, token_masks)``
-        tuples on each step.
+        tuples on each step. Pass either ``tokens`` or ``input_embeds``.
         """
-        assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
+        if (tokens is None) == (input_embeds is None):
+            raise ValueError("Pass exactly one of `tokens` or `input_embeds`.")
+        if tokens is not None:
+            assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
+            
         device = self.model.get_device()
         rng = torch.Generator(device=device)
         rng.manual_seed(seed)
@@ -255,17 +260,21 @@ class Engine:
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
         kv_model_kwargs = {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
+        seq_len = len(tokens) if tokens is not None else input_embeds.size(1)
         kv_cache_prefill = KVCache(
             batch_size=1,
-            seq_len=len(tokens),
+            seq_len=seq_len,
             **kv_model_kwargs,
         )
-        ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
+        if tokens is not None:
+            ids = torch.tensor([tokens], dtype=torch.long, device=device)
+            logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
+        else:
+            logits = self.model.forward(None, kv_cache=kv_cache_prefill, input_embeds=input_embeds.unsqueeze(0))
         logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
 
         # 2) Replicate the KV cache for each sample/row
-        kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
+        kv_length_hint = (seq_len + (max_tokens or 0)) if max_tokens is not None else self.model.config.sequence_len
         kv_cache_decode = KVCache(
             batch_size=num_samples,
             seq_len=kv_length_hint,
@@ -275,7 +284,7 @@ class Engine:
         del kv_cache_prefill # no need to keep this memory around
 
         # 3) Initialize states for each sample
-        row_states = [RowState(tokens.copy()) for _ in range(num_samples)]
+        row_states = [RowState((tokens or []).copy()) for _ in range(num_samples)]
 
         # 4) Main generation loop
         num_generated = 0

@@ -191,6 +191,16 @@ python -m pytest tests/ -v -s
 | [LZ78_TOKENIZER.md](docs/LZ78_TOKENIZER.md) | LZ78 training strategies and formats |
 | [EXPERIMENTS.md](docs/EXPERIMENTS.md) | 26-run tokenizer ablation results |
 
+## Support for Vision
+- [ ] input_embed support in forward
+- [ ] input_embed support in generate
+- [ ] adding a lightweight vision encoder
+- [ ] add vision tokens
+- [ ] prepare a tiny vision dataset to train
+- [ ] an embedding function for vision
+- [ ] [optional] support for LoRA
+- [ ] [optional] support for MoE
+
 ## Contributing
 
 nanochat is nowhere near finished. The goal is to improve the state of the art in micro models that are accessible to work with end to end on budgets of < $1000 dollars. Accessibility is about overall cost but also about cognitive complexity - nanochat is not an exhaustively configurable LLM "framework"; there will be no giant configuration objects, model factories, or if-then-else monsters in the code base. It is a single, cohesive, minimal, readable, hackable, maximally-forkable "strong baseline" codebase designed to run start to end and produce a concrete ChatGPT clone and its report card.

@@ -344,23 +344,31 @@ class GPT(nn.Module):
 
     def forward(
         self,
-        idx: torch.Tensor,
+        idx: torch.Tensor | None = None,
         targets: torch.Tensor | None = None,
         kv_cache: object | None = None,
         loss_reduction: str = "mean",
+        input_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        B, T = idx.size()
+        if (idx is None) == (input_embeds is None):
+            raise ValueError("Pass exactly one of `idx` or `input_embeds`.")
+        device = self.get_device()
+        if input_embeds is not None:
+            x = input_embeds.to(device=device)
+            B, T, _ = x.size()
+        else:
+            B, T = idx.size()
+            x = self.transformer.wte(idx)
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
-        assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
+        assert x.device == self.cos.device, f"Input and rotary embeddings on different devices: {x.device} != {self.cos.device}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
         # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
         T0 = 0 if kv_cache is None else kv_cache.get_pos()
         cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
 
-        # Forward the trunk of the Transformer
-        x = self.transformer.wte(idx)
+        # Forward the trunk of the Transformer (x already set above from idx or input_embeds)
         x = norm(x)
         for block in self.transformer.h:
             x = block(x, cos_sin, kv_cache)
@@ -385,35 +393,52 @@ class GPT(nn.Module):
     @torch.inference_mode()
     def generate(
         self,
-        tokens: list[int],
-        max_tokens: int,
+        tokens: list[int] | None = None,
+        max_tokens: int = 256,
         temperature: float = 1.0,
         top_k: int | None = None,
         seed: int = 42,
+        input_embeds: torch.Tensor | None = None,
     ) -> Generator[int, None, None]:
         """Generate tokens autoregressively via streaming.
 
-        Assumes batch size 1. Input and yielded tokens are plain Python ints.
+        Assumes batch size 1. Pass either ``tokens`` or ``input_embeds``.
+        Input and yielded tokens are plain Python ints.
         """
-        assert isinstance(tokens, list)
+        if (tokens is None) == (input_embeds is None):
+            raise ValueError("Pass exactly one of `tokens` or `input_embeds`.")
+        if tokens is not None:
+            assert isinstance(tokens, list)
         device = self.get_device()
         rng = None
         if temperature > 0:
             rng = torch.Generator(device=device)
             rng.manual_seed(seed)
-        ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
+        use_input_embeds = input_embeds is not None
+        if tokens:
+            ids = torch.tensor([tokens], dtype=torch.long, device=device)  # add batch dim
         for _ in range(max_tokens):
-            logits = self.forward(ids) # (B, T, vocab_size)
-            logits = logits[:, -1, :] # (B, vocab_size)
+            if use_input_embeds:
+                logits = self.forward(None, input_embeds=input_embeds)
+                use_input_embeds = False
+                ids = None  # will be set from first sampled token
+            else:
+                logits = self.forward(ids)
+            logits = logits[:, -1, :]  # (B, vocab_size)
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
+                logits[logits < v[:, [-1]]] = -float("Inf")
             if temperature > 0:
                 logits = logits / temperature
                 probs = F.softmax(logits, dim=-1)
                 next_ids = torch.multinomial(probs, num_samples=1, generator=rng)
             else:
                 next_ids = torch.argmax(logits, dim=-1, keepdim=True)
-            ids = torch.cat((ids, next_ids), dim=1)
             token = next_ids.item()
+            if ids is None:
+                ids = next_ids.unsqueeze(0)  # (1, 1)
+            else:
+                ids = torch.cat((ids, next_ids), dim=1)
             yield token
+    
+    
