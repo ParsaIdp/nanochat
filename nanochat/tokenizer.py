@@ -336,13 +336,29 @@ class RustBPETokenizer:
         self.bos_token_id: int = self.encode_special(bos_token)
 
     @classmethod
-    def train_from_iterator(cls, text_iterator, vocab_size: int, pattern: str = SPLIT_PATTERN) -> "RustBPETokenizer":
+    def train_from_iterator(
+        cls,
+        text_iterator: Iterator[str],
+        vocab_size: int,
+        allow_superchunk: bool,
+        pattern: str = SPLIT_PATTERN,
+        max_superchunk_chunks: int = 0,
+        tokenizer_dir: str | None = None,
+    ) -> "RustBPETokenizer":
         # 1) train using rustbpe
         tokenizer = rustbpe.Tokenizer()
         # the special tokens are inserted later in __init__, we don't train them here
         vocab_size_no_special = vocab_size - len(SPECIAL_TOKENS)
         assert vocab_size_no_special >= 256, f"vocab_size_no_special must be at least 256, got {vocab_size_no_special}"
-        tokenizer.train_from_iterator(text_iterator, vocab_size_no_special, pattern=pattern)
+        train_kwargs = {
+            "vocab_size": vocab_size_no_special,
+            "pattern": pattern,
+            "allow_superchunk": allow_superchunk,
+            "max_superchunk_chunks": max_superchunk_chunks,
+        }
+        if tokenizer_dir is not None:
+            train_kwargs["tokenizer_dir"] = tokenizer_dir
+        tokenizer.train_from_iterator(text_iterator, **train_kwargs)
         # 2) construct the associated tiktoken encoding for inference
         pattern = tokenizer.get_pattern()
         mergeable_ranks_list = tokenizer.get_mergeable_ranks()
@@ -586,6 +602,60 @@ def get_tokenizer(tokenizer_path: str | None = None) -> RustBPETokenizer:
     else:
         tokenizer_dir = tokenizer_path
     return RustBPETokenizer.from_directory(tokenizer_dir)
+
+def token_id_to_token_str_map(tokenizer_dir: str) -> dict[int, str]:
+    """Load a tokenizer folder and return a mapping from token id -> token string.
+
+    Supported formats:
+    - RustBPETokenizer: <tokenizer_dir>/tokenizer.pkl
+    - HuggingFaceTokenizer: <tokenizer_dir>/tokenizer.json
+    """
+    rust_pkl_path = os.path.join(tokenizer_dir, "tokenizer.pkl")
+    hf_json_path = os.path.join(tokenizer_dir, "tokenizer.json")
+
+    if os.path.exists(rust_pkl_path):
+        tok = RustBPETokenizer.from_directory(tokenizer_dir)
+        id_to_str: dict[int, str] = {}
+        n_vocab = tok.enc.n_vocab
+        for token_id in range(n_vocab):
+            try:
+                token_bytes = tok.enc.decode_single_token_bytes(token_id)
+            except Exception:
+                # Fall back to slower but more general decoding.
+                try:
+                    id_to_str[token_id] = tok.decode([token_id])
+                    continue
+                except Exception:
+                    id_to_str[token_id] = f"<decode_error:{token_id}>"
+                    continue
+
+            try:
+                id_to_str[token_id] = token_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                # Keep it readable and stable for arbitrary byte-level tokens.
+                id_to_str[token_id] = token_bytes.decode("utf-8", errors="backslashreplace")
+        return id_to_str
+
+    if os.path.exists(hf_json_path):
+        tok = HuggingFaceTokenizer.from_directory(tokenizer_dir)
+        vocab = tok.tokenizer.get_vocab()  # token_str -> token_id
+        id_to_str = {token_id: token_str for token_str, token_id in vocab.items()}
+        return id_to_str
+
+    raise FileNotFoundError(
+        f"No supported tokenizer files found in {tokenizer_dir}. "
+        "Expected tokenizer.pkl (RustBPETokenizer) or tokenizer.json (HuggingFaceTokenizer)."
+    )
+
+def write_token_mapping_file(tokenizer_dir: str, filename: str = "token_mapping") -> str:
+    id_to_str = token_id_to_token_str_map(tokenizer_dir)
+    out_path = os.path.join(tokenizer_dir, filename)
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+        for token_id in range(len(id_to_str)):
+            token_str = id_to_str[token_id]
+            token_str = token_str.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+            f.write(f"{token_id}\t{token_str}\n")
+    return out_path
 
 def get_token_bytes(device: str = "cpu", tokenizer_path: str | None = None) -> "torch.Tensor":
     """Load the token_bytes.pt tensor (written by tok_train.py) for embedding visualization."""

@@ -3,10 +3,14 @@ Common utilities for nanochat.
 """
 
 import os
-import re
+import time
+import json
+import math
+import random
 import logging
 import urllib.request
 from typing import Any, Callable
+import re
 
 import torch
 import torch.distributed as dist
@@ -54,9 +58,13 @@ def get_base_dir() -> str:
     if os.environ.get("NANOCHAT_BASE_DIR"):
         nanochat_dir = os.environ.get("NANOCHAT_BASE_DIR")
     else:
-        nanochat_dir = "/large_storage/goodarzilab/parsaidp/nanochat"
+        nanochat_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.makedirs(nanochat_dir, exist_ok=True)
     return nanochat_dir
+
+
+def get_project_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def download_file_with_lock(url: str, filename: str, postprocess_fn: Callable | None = None) -> str:
     """

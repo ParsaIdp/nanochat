@@ -10,7 +10,7 @@ dependencies = [
     "filelock>=3.0.0",
     "psutil>=7.1.0",
     "regex>=2025.9.1",
-    "rustbpe>=0.1.0",
+    "rustbpe @ git+https://github.com/eshansinghal14/rustbpe.git@master",
     "setuptools>=80.9.0",
     "tiktoken>=0.11.0",
     "tokenizers>=0.22.0",
@@ -19,13 +19,17 @@ dependencies = [
     "wandb>=0.21.3",
 ]
 
-[project.optional-dependencies.lz78]
-lz-tokenizer = []
-
-[dependency-groups]
+[project.optional-dependencies]
+lz78 = []
 dev = [
     "pytest>=8.0.0",
 ]
+cpu = [  
+    "torch>=2.8.0",  
+]  
+gpu = [  
+    "torch>=2.8.0",  
+]  
 
 [tool.pytest.ini_options]
 markers = [
@@ -35,6 +39,9 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+
+[tool.setuptools.packages.find]
+include = ["nanochat"]
 
 # target torch to cuda 12.8 or CPU
 [tool.uv.sources]
@@ -53,18 +60,10 @@ name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"  
 explicit = true
 
-[project.optional-dependencies]  
-cpu = [  
-    "torch>=2.8.0",  
-]  
-gpu = [  
-    "torch>=2.8.0",  
-]  
-  
 [tool.uv]  
 conflicts = [  
     [  
         { extra = "cpu" },  
         { extra = "gpu" },  
     ],  
-]  
+]

@@ -4,6 +4,8 @@ In the style of GPT-4 tokenizer.
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 import logging
 import os
 import time
@@ -11,7 +13,10 @@ import argparse
 import torch
 
 logger = logging.getLogger(__name__)
-from nanochat.tokenizer import RustBPETokenizer
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+from nanochat.tokenizer import RustBPETokenizer, write_token_mapping_file
 from nanochat.common import get_base_dir
 from nanochat.dataset import parquets_iter_batched
 
@@ -23,12 +28,20 @@ parser.add_argument('--max_chars', type=int, default=10_000_000_000, help='Maxim
 parser.add_argument('--doc_cap', type=int, default=10_000, help='Maximum characters per document (default: 10,000)')
 parser.add_argument('--vocab_size', type=int, default=65536, help='Vocabulary size (default: 65536 = 2^16)')
 parser.add_argument('--tokenizer_dir', type=str, default="tokenizer", help='Directory to save the tokenizer (default: tokenizer)')
+parser.add_argument('--data_dir', type=str, default=None, help='Directory containing parquet shards (default: base_data under NANOCHAT_BASE_DIR)')
 parser.add_argument('--no_chunking', action='store_true', help='Disable GPT-4 regex chunking (train BPE on raw bytes)')
+parser.add_argument('--allow_superchunk', action='store_true', help='Allow superchunking')
+parser.add_argument('--max_superchunk_chunks', type=int, default=0, help='Maximum chunks per superchunk when --allow_superchunk (0 = no cap)')
+
 args = parser.parse_args()
 logger.info(f"max_chars: {args.max_chars:,}")
 logger.info(f"doc_cap: {args.doc_cap:,}")
 logger.info(f"vocab_size: {args.vocab_size:,}")
 logger.info(f"tokenizer_dir: {args.tokenizer_dir}")
+logger.info(f"data_dir: {args.data_dir}")
+logger.info(f"no_chunking: {args.no_chunking}")
+logger.info(f"allow_superchunk: {args.allow_superchunk}")
+logger.info(f"max_superchunk_chunks: {args.max_superchunk_chunks}")
 # -----------------------------------------------------------------------------
 # Text iterator
 
@@ -39,7 +52,7 @@ def text_iterator() -> "Generator[str, None, None]":
     3) Break when we've seen args.max_chars characters
     """
     nchars = 0
-    for batch in parquets_iter_batched(split="train"):
+    for batch in parquets_iter_batched(split="train", data_dir=args.data_dir):
         for doc in batch:
             doc_text = doc
             if len(doc_text) > args.doc_cap:
@@ -52,21 +65,31 @@ text_iter = text_iterator()
 
 # -----------------------------------------------------------------------------
 # Train the tokenizer
+base_dir = get_base_dir()
+tokenizer_dir = args.tokenizer_dir if os.path.isabs(args.tokenizer_dir) else os.path.join(base_dir, args.tokenizer_dir)
+os.makedirs(tokenizer_dir, exist_ok=True)
 t0 = time.time()
 train_kwargs = {}
 if args.no_chunking:
     logger.info("Training BPE WITHOUT regex chunking (raw bytes)")
     train_kwargs["pattern"] = r"[\s\S]+"
-tokenizer = RustBPETokenizer.train_from_iterator(text_iter, args.vocab_size, **train_kwargs)
+tokenizer = RustBPETokenizer.train_from_iterator(
+    text_iter,
+    args.vocab_size,
+    args.allow_superchunk,
+    max_superchunk_chunks=args.max_superchunk_chunks,
+    tokenizer_dir=tokenizer_dir,
+    **train_kwargs,
+)
 t1 = time.time()
 train_time = t1 - t0
 logger.info(f"Training time: {train_time:.2f}s")
 
 # -----------------------------------------------------------------------------
 # Save the tokenizer to disk
-base_dir = get_base_dir()
-tokenizer_dir = os.path.join(base_dir, args.tokenizer_dir)
 tokenizer.save(tokenizer_dir)
+token_mapping_path = write_token_mapping_file(tokenizer_dir)
+logger.info(f"Saved token_mapping to {token_mapping_path}")
 
 # -----------------------------------------------------------------------------
 # Quick inline sanity check

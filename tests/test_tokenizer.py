@@ -112,7 +112,7 @@ class TestRustBPETokenizer:
             "Hello world! This is a test of the tokenizer. " * 20,
             "Python is a great programming language. " * 20,
         ]
-        self.tok = RustBPETokenizer.train_from_iterator(iter(corpus), vocab_size=300)
+        self.tok = RustBPETokenizer.train_from_iterator(iter(corpus), vocab_size=300, allow_superchunk=False)
 
     def test_vocab_size(self):
         assert self.tok.get_vocab_size() == 300
