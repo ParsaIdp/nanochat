@@ -30,6 +30,7 @@ parser.add_argument('--vocab_size', type=int, default=65536, help='Vocabulary si
 parser.add_argument('--tokenizer_dir', type=str, default="tokenizer", help='Directory to save the tokenizer (default: tokenizer)')
 parser.add_argument('--data_dir', type=str, default=None, help='Directory containing parquet shards (default: base_data under NANOCHAT_BASE_DIR)')
 parser.add_argument('--no_chunking', action='store_true', help='Disable GPT-4 regex chunking (train BPE on raw bytes)')
+parser.add_argument('--no_chunking_length', type=int, default=0, help='Chunk sizes for BPE w/o chunking to reduce RAM util (0 = no cap)')
 parser.add_argument('--allow_superchunk', action='store_true', help='Allow superchunking')
 parser.add_argument('--max_superchunk_chunks', type=int, default=0, help='Maximum chunks per superchunk when --allow_superchunk (0 = no cap)')
 
@@ -40,6 +41,7 @@ logger.info(f"vocab_size: {args.vocab_size:,}")
 logger.info(f"tokenizer_dir: {args.tokenizer_dir}")
 logger.info(f"data_dir: {args.data_dir}")
 logger.info(f"no_chunking: {args.no_chunking}")
+logger.info(f"no_chunking_length: {args.no_chunking_length}")
 logger.info(f"allow_superchunk: {args.allow_superchunk}")
 logger.info(f"max_superchunk_chunks: {args.max_superchunk_chunks}")
 # -----------------------------------------------------------------------------
@@ -73,6 +75,8 @@ train_kwargs = {}
 if args.no_chunking:
     logger.info("Training BPE WITHOUT regex chunking (raw bytes)")
     train_kwargs["pattern"] = r"[\s\S]+"
+    if args.no_chunking_length > 0:
+        train_kwargs["pattern"] = rf"[\s\S]{{1,{args.no_chunking_length}}}"
 tokenizer = RustBPETokenizer.train_from_iterator(
     text_iter,
     args.vocab_size,
