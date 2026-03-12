@@ -72,7 +72,8 @@ t0 = time.time()
 train_kwargs = {}
 if args.no_chunking:
     logger.info("Training BPE WITHOUT regex chunking (raw bytes)")
-    train_kwargs["pattern"] = r"[\s\S]+"
+    # train_kwargs["pattern"] = r"[\s\S]+"
+    train_kwargs["pattern"] = r"[^\n]+"
 tokenizer = RustBPETokenizer.train_from_iterator(
     text_iter,
     args.vocab_size,
