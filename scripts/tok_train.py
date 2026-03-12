@@ -25,6 +25,7 @@ from nanochat.dataset import parquets_iter_batched
 
 parser = argparse.ArgumentParser(description='Train a BPE tokenizer')
 parser.add_argument('--max_chars', type=int, default=10_000_000_000, help='Maximum characters to train on (default: 10B)')
+parser.add_argument('--max_docs', type=int, default=1_000_000_000, help='Maximum docs to train on (default: 1B)')
 parser.add_argument('--doc_cap', type=int, default=10_000, help='Maximum characters per document (default: 10,000)')
 parser.add_argument('--vocab_size', type=int, default=65536, help='Vocabulary size (default: 65536 = 2^16)')
 parser.add_argument('--tokenizer_dir', type=str, default="tokenizer", help='Directory to save the tokenizer (default: tokenizer)')
@@ -35,6 +36,7 @@ parser.add_argument('--max_superchunk_chunks', type=int, default=0, help='Maximu
 
 args = parser.parse_args()
 logger.info(f"max_chars: {args.max_chars:,}")
+logger.info(f"max_docs: {args.max_docs:,}")
 logger.info(f"doc_cap: {args.doc_cap:,}")
 logger.info(f"vocab_size: {args.vocab_size:,}")
 logger.info(f"tokenizer_dir: {args.tokenizer_dir}")
@@ -52,14 +54,16 @@ def text_iterator() -> "Generator[str, None, None]":
     3) Break when we've seen args.max_chars characters
     """
     nchars = 0
+    ndocs = 0
     for batch in parquets_iter_batched(split="train", data_dir=args.data_dir):
         for doc in batch:
             doc_text = doc
             if len(doc_text) > args.doc_cap:
                 doc_text = doc_text[:args.doc_cap]
             nchars += len(doc_text)
+            ndocs += 1
             yield doc_text
-            if nchars > args.max_chars:
+            if nchars > args.max_chars or ndocs > args.max_docs:
                 return
 text_iter = text_iterator()
 
