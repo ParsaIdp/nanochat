@@ -33,6 +33,7 @@ parser.add_argument('--data_dir', type=str, default=None, help='Directory contai
 parser.add_argument('--no_chunking', action='store_true', help='Disable GPT-4 regex chunking (train BPE on raw bytes)')
 parser.add_argument('--allow_superchunk', action='store_true', help='Allow superchunking')
 parser.add_argument('--max_superchunk_chunks', type=int, default=0, help='Maximum chunks per superchunk when --allow_superchunk (0 = no cap)')
+parser.add_argument('--superchunk_pattern', type=str, default=None, help='Regex pattern for superchunking')
 
 args = parser.parse_args()
 logger.info(f"max_chars: {args.max_chars:,}")
@@ -74,9 +75,10 @@ tokenizer_dir = args.tokenizer_dir if os.path.isabs(args.tokenizer_dir) else os.
 os.makedirs(tokenizer_dir, exist_ok=True)
 t0 = time.time()
 train_kwargs = {}
+train_kwargs["superchunk_pattern"] = args.superchunk_pattern
 if args.no_chunking:
     logger.info("Training BPE WITHOUT regex chunking (raw bytes)")
-    train_kwargs["pattern"] = r"[^\n]+"
+    train_kwargs["chunk_pattern"] = r"[^\n]+"
 tokenizer = RustBPETokenizer.train_from_iterator(
     text_iter,
     args.vocab_size,

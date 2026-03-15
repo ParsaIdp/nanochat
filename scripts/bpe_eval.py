@@ -9,7 +9,9 @@ def _byte_lens_from_file(path):
     """Load a tiktoken Encoding .pkl and return an array of per-token byte lengths."""
     with open(path, "rb") as f:
         enc = pickle.load(f)
-    return np.array([len(b) for b in enc.token_byte_values()])
+    id_to_bytes = {rank: token for token, rank in enc._mergeable_ranks.items()}
+    byte_lens = [len(id_to_bytes[i]) for i in range(len(id_to_bytes))]
+    return np.array(byte_lens)
 
 
 def plot_bytes_per_token(dictionaries_path):
@@ -46,7 +48,6 @@ def plot_bytes_per_token(dictionaries_path):
             byte_lens = _byte_lens_from_file(fpath)
 
             xs = [vs for vs in vocab_sizes if vs <= len(byte_lens)]
-            print(len(byte_lens))
             ys = [byte_lens[:vs].mean() for vs in xs]
 
             label = f"{subdir} / {os.path.splitext(fname)[0].lstrip('_')}"
