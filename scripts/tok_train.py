@@ -82,7 +82,7 @@ if args.no_chunking:
 tokenizer = RustBPETokenizer.train_from_iterator(
     text_iter,
     args.vocab_size,
-    args.allow_superchunk,
+    allow_superchunk=args.allow_superchunk,
     max_superchunk_chunks=args.max_superchunk_chunks,
     tokenizer_dir=tokenizer_dir,
     **train_kwargs,
