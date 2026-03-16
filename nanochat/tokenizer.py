@@ -352,16 +352,16 @@ class RustBPETokenizer:
         # the special tokens are inserted later in __init__, we don't train them here
         vocab_size_no_special = vocab_size - len(SPECIAL_TOKENS)
         assert vocab_size_no_special >= 256, f"vocab_size_no_special must be at least 256, got {vocab_size_no_special}"
+        # rustbpe uses chunk_pattern for the split regex (no longer "pattern")
+        effective_chunk_pattern = chunk_pattern if chunk_pattern is not None else pattern
         train_kwargs = {
             "vocab_size": vocab_size_no_special,
-            "pattern": pattern,
+            "chunk_pattern": effective_chunk_pattern,
             "allow_superchunk": allow_superchunk,
             "max_superchunk_chunks": max_superchunk_chunks,
         }
         if tokenizer_dir is not None:
             train_kwargs["tokenizer_dir"] = tokenizer_dir
-        if chunk_pattern is not None:
-            train_kwargs["chunk_pattern"] = chunk_pattern
         if superchunk_pattern is not None:
             train_kwargs["superchunk_pattern"] = superchunk_pattern
         tokenizer.train_from_iterator(text_iterator, **train_kwargs)
