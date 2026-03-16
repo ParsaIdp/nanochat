@@ -79,7 +79,6 @@ train_kwargs["superchunk_pattern"] = args.superchunk_pattern
 if args.no_chunking:
     logger.info("Training BPE WITHOUT regex chunking (raw bytes)")
     train_kwargs["chunk_pattern"] = r"[^\n]+"
-print(train_kwargs)
 tokenizer = RustBPETokenizer.train_from_iterator(
     text_iter,
     args.vocab_size,
