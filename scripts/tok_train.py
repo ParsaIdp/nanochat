@@ -18,7 +18,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 from nanochat.tokenizer import RustBPETokenizer, write_token_mapping_file
 from nanochat.common import get_base_dir
-from nanochat.dataset import iter_docs_by_split
+from nanochat.dataset import iter_docs_by_split, iter_numina_math_cot_docs
 
 # -----------------------------------------------------------------------------
 # Parse command line arguments
@@ -26,10 +26,10 @@ from nanochat.dataset import iter_docs_by_split
 parser = argparse.ArgumentParser(description='Train a BPE tokenizer')
 parser.add_argument('--max_chars', type=int, default=10_000_000_000, help='Maximum characters to train on (default: 10B)')
 parser.add_argument('--max_docs', type=int, default=1_000_000_000, help='Maximum docs to train on (default: 1B)')
-parser.add_argument('--doc_cap', type=int, default=10_000, help='Maximum characters per document (default: 10,000)')
+parser.add_argument('--doc_cap', type=int, default=10_000, help='Max characters per document (parquet), or number of problems to use (numina_math_cot); default 10,000')
 parser.add_argument('--vocab_size', type=int, default=65536, help='Vocabulary size (default: 65536 = 2^16)')
 parser.add_argument('--tokenizer_dir', type=str, default="tokenizer", help='Directory to save the tokenizer (default: tokenizer)')
-parser.add_argument('--data_dir', type=str, default=None, help='Directory containing parquet shards (default: base_data under NANOCHAT_BASE_DIR)')
+parser.add_argument('--data_dir', type=str, default=None, help='Directory containing parquet shards, or "numina_math_cot" to use NuminaMath-CoT (default: base_data under NANOCHAT_BASE_DIR)')
 parser.add_argument('--no_chunking', action='store_true', help='Disable GPT-4 regex chunking (train BPE on raw bytes)')
 parser.add_argument('--allow_superchunk', action='store_true', help='Allow superchunking')
 parser.add_argument('--max_superchunk_chunks', type=int, default=0, help='Maximum chunks per superchunk when --allow_superchunk (0 = no cap)')
@@ -46,15 +46,19 @@ logger.info(f"no_chunking: {args.no_chunking}")
 logger.info(f"allow_superchunk: {args.allow_superchunk}")
 logger.info(f"max_superchunk_chunks: {args.max_superchunk_chunks}")
 # -----------------------------------------------------------------------------
-# Text iterator (shared with bpe_eval via nanochat.dataset.iter_docs_by_split)
+# Text iterator (shared with bpe_eval via nanochat.dataset when using parquet)
 
-text_iter = iter_docs_by_split(
-    args.data_dir,
-    "train",
-    doc_cap=args.doc_cap,
-    max_docs=args.max_docs,
-    max_chars=args.max_chars,
-)
+if args.data_dir == "numina_math_cot":
+    # doc_cap = number of problems to use for training
+    text_iter = iter_numina_math_cot_docs("train", max_problems=args.doc_cap)
+else:
+    text_iter = iter_docs_by_split(
+        args.data_dir,
+        "train",
+        doc_cap=args.doc_cap,
+        max_docs=args.max_docs,
+        max_chars=args.max_chars,
+    )
 
 # -----------------------------------------------------------------------------
 # Train the tokenizer

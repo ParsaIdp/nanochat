@@ -16,6 +16,7 @@ import requests
 import pyarrow.parquet as pq
 from multiprocessing import Pool
 
+from datasets import load_dataset
 from nanochat.common import get_base_dir
 
 # -----------------------------------------------------------------------------
@@ -33,6 +34,55 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 # -----------------------------------------------------------------------------
 # These functions are useful utilities to other modules, can/should be imported
+
+
+def load_numina_math_cot(split: str = "train", *, cache_subdir: str = "numina_math_cot"):
+    """
+    Load the NuminaMath-CoT dataset from Hugging Face.
+
+    This is a thin wrapper around datasets.load_dataset so that training code
+    can depend on nanochat.dataset instead of importing datasets directly.
+
+    Args:
+        split: Dataset split to load (e.g. "train", "test", "validation", or a HF slice).
+        cache_subdir: Subdirectory under the nanochat base directory to use as the HF cache dir.
+
+    Returns:
+        A datasets.Dataset (or DatasetDict if split is None).
+    """
+    cache_dir = os.path.join(base_dir, cache_subdir)
+    os.makedirs(cache_dir, exist_ok=True)
+    return load_dataset("AI-MO/NuminaMath-CoT", split=split, cache_dir=cache_dir)
+
+
+def iter_numina_math_cot_docs(
+    split: str = "train",
+    *,
+    max_problems: int | None = None,
+    cache_subdir: str = "numina_math_cot",
+) -> Generator[str, None, None]:
+    """
+    Iterate over NuminaMath-CoT documents (one per problem): each yielded string is
+    the concatenation of problem and solution for one example.
+
+    Args:
+        split: Dataset split (e.g. "train").
+        max_problems: Maximum number of problems to yield (default: all).
+        cache_subdir: Subdir under base dir for HF cache.
+
+    Yields:
+        One document string per problem (problem + solution text).
+    """
+    ds = load_numina_math_cot(split=split, cache_subdir=cache_subdir)
+    for i, row in enumerate(ds):
+        if max_problems is not None and i >= max_problems:
+            break
+        problem = row.get("problem") or ""
+        solution = row.get("solution") or ""
+        doc = f"{problem}\n\n{solution}".strip()
+        if doc:
+            yield doc
+
 
 def list_parquet_files(data_dir: str | None = None) -> list[str]:
     """Looks into a data dir and returns full paths to all parquet files."""

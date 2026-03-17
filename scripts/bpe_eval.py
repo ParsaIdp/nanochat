@@ -152,6 +152,11 @@ def plot_chunk_distribution(
     return fig
 
 
+# No-split pattern for expanding OOV tokens so superchunk tokens (e.g. " We've")
+# are not re-split by the GPT-4 regex when we decode and re-encode.
+_NO_SPLIT_PATTERN = r"[\s\S]+"
+
+
 def _effective_token_count(
     doc_strings: list[str],
     enc: tiktoken.Encoding,
@@ -159,28 +164,35 @@ def _effective_token_count(
     _truncated_cache: dict | None = None,
 ) -> float:
     """
-    Token count when using only the first vocab_size tokens (standard BPE).
-    Encode each doc with a truncated vocab (first V tokens) and sum lengths;
-    avoids one giant string so encoding is much faster.
+    Token count when using only the first vocab_size tokens.
+
+    Encodes each document directly with a truncated encoder that has only the
+    first vocab_size merges and uses a no-split pre-tokenization pattern. This
+    gives the exact count (no overcount from expanding OOV pieces separately,
+    which would forbid merges across full-token boundaries).
     """
+    if _truncated_cache is None:
+        _truncated_cache = {}
     if vocab_size not in _truncated_cache:
         mr = enc._mergeable_ranks
         truncated_mr = {k: v for k, v in mr.items() if v < vocab_size}
         _truncated_cache[vocab_size] = tiktoken.Encoding(
             name=f"trunc_{vocab_size}",
-            pat_str=enc._pat_str,
+            pat_str=_NO_SPLIT_PATTERN,
             mergeable_ranks=truncated_mr,
             special_tokens={},
         )
     truncated_enc = _truncated_cache[vocab_size]
-    # Debug: print token strings for a 200-char sample (every call)
+
+    # Debug: print token strings for a 200-char sample using only first vocab_size tokens
     sample = ("".join(doc_strings))[:200] if doc_strings else " " * 200
     if len(sample) < 200 and doc_strings:
         sample = (sample + " " * 200)[:200]
     token_ids = truncated_enc.encode(sample)
     token_strings = [truncated_enc.decode([tid]) for tid in token_ids]
     print(f"effective_token_count vocab_size={vocab_size} 200-char sample token strings: {token_strings}")
-    return sum(len(truncated_enc.encode(d)) for d in doc_strings)
+
+    return sum(len(truncated_enc.encode(doc)) for doc in doc_strings)
 
 
 def plot_bytes_per_token_vs_vocab(
@@ -282,7 +294,7 @@ if __name__ == "__main__":
             f"{dictionaries_path}/bpe_chunk",
             f"{dictionaries_path}/bpe_superchunk_para",
         ],
-        10_000,
+        1_000,
         [1_000, 4_000, 16_000, 64_000, 128_000],
     )
     bytes_per_token_vs_vocab.show()
