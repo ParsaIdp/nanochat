@@ -65,6 +65,37 @@ def parquets_iter_batched(
             texts = rg.column('text').to_pylist()
             yield texts
 
+
+def iter_docs_by_split(
+    data_dir: str | None,
+    split: str,
+    *,
+    doc_cap: int | None = None,
+    max_docs: int | None = None,
+    max_chars: int | None = None,
+) -> Generator[str, None, None]:
+    """
+    Same text iterator as tok_train: flatten parquets_iter_batched(split, data_dir),
+    optionally crop each doc to doc_cap chars, stop after max_docs or max_chars.
+    Used by both tok_train and bpe_eval so they see the same train/val documents.
+    """
+    assert split in ["train", "val"], "split must be 'train' or 'val'"
+    nchars = 0
+    ndocs = 0
+    for batch in parquets_iter_batched(split=split, data_dir=data_dir):
+        for doc in batch:
+            doc_text = doc
+            if doc_cap is not None and len(doc_text) > doc_cap:
+                doc_text = doc_text[:doc_cap]
+            nchars += len(doc_text)
+            ndocs += 1
+            yield doc_text
+            if max_docs is not None and ndocs >= max_docs:
+                return
+            if max_chars is not None and nchars >= max_chars:
+                return
+
+
 # -----------------------------------------------------------------------------
 def download_single_file(index: int) -> bool:
     """ Downloads a single file index, with some backoff """

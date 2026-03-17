@@ -18,7 +18,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 from nanochat.tokenizer import RustBPETokenizer, write_token_mapping_file
 from nanochat.common import get_base_dir
-from nanochat.dataset import parquets_iter_batched
+from nanochat.dataset import iter_docs_by_split
 
 # -----------------------------------------------------------------------------
 # Parse command line arguments
@@ -46,27 +46,15 @@ logger.info(f"no_chunking: {args.no_chunking}")
 logger.info(f"allow_superchunk: {args.allow_superchunk}")
 logger.info(f"max_superchunk_chunks: {args.max_superchunk_chunks}")
 # -----------------------------------------------------------------------------
-# Text iterator
+# Text iterator (shared with bpe_eval via nanochat.dataset.iter_docs_by_split)
 
-def text_iterator() -> "Generator[str, None, None]":
-    """
-    1) Flatten the batches into a single iterator
-    2) Crop every document to args.doc_cap characters
-    3) Break when we've seen args.max_chars characters
-    """
-    nchars = 0
-    ndocs = 0
-    for batch in parquets_iter_batched(split="train", data_dir=args.data_dir):
-        for doc in batch:
-            doc_text = doc
-            if len(doc_text) > args.doc_cap:
-                doc_text = doc_text[:args.doc_cap]
-            nchars += len(doc_text)
-            ndocs += 1
-            yield doc_text
-            if nchars > args.max_chars or ndocs > args.max_docs:
-                return
-text_iter = text_iterator()
+text_iter = iter_docs_by_split(
+    args.data_dir,
+    "train",
+    doc_cap=args.doc_cap,
+    max_docs=args.max_docs,
+    max_chars=args.max_chars,
+)
 
 # -----------------------------------------------------------------------------
 # Train the tokenizer

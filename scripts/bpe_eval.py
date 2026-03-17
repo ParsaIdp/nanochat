@@ -1,14 +1,13 @@
 import os
 import pickle
-import itertools
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import pyarrow.parquet as pq
 import regex
+import tiktoken
 
-from nanochat.dataset import list_parquet_files, parquets_iter_batched
-from nanochat.tokenizer import RustBPETokenizer
+from nanochat.dataset import list_parquet_files, iter_docs_by_split
 
 # GPT-4 pre-tokenization pattern: number of chunks per token = len(regex.findall(..., token_str))
 GPT4_PATTERN = regex.compile(
@@ -21,34 +20,6 @@ DATASET_PATHS = {
 }
 
 
-def iter_docs(data_dir: str):
-    """Yield document strings from all parquet shards in data_dir (sorted by filename)."""
-    paths = list_parquet_files(data_dir=data_dir)
-    for filepath in paths:
-        pf = pq.ParquetFile(filepath)
-        for rg_idx in range(pf.num_row_groups):
-            rg = pf.read_row_group(rg_idx)
-            for text in rg.column("text").to_pylist():
-                yield text
-
-
-def iter_docs_by_split(
-    split: str,
-    data_dir: str,
-    doc_cap: int | None = None,
-):
-    """
-    Same iteration as tok_train: parquets_iter_batched(split=..., data_dir=...),
-    flattened to one doc per yield. split is "train" (all but last file) or "val" (last file).
-    If doc_cap is set, each doc is cropped to that many characters (like tok_train).
-    """
-    for batch in parquets_iter_batched(split=split, data_dir=data_dir):
-        for doc in batch:
-            if doc_cap is not None and len(doc) > doc_cap:
-                doc = doc[:doc_cap]
-            yield doc
-
-
 def _byte_lens_from_file(path):
     """Load a tiktoken Encoding .pkl and return an array of per-token byte lengths."""
     with open(path, "rb") as f:
@@ -56,6 +27,12 @@ def _byte_lens_from_file(path):
     id_to_bytes = {rank: token for token, rank in enc._mergeable_ranks.items()}
     byte_lens = [len(id_to_bytes[i]) for i in range(len(id_to_bytes))]
     return np.array(byte_lens)
+
+
+def _load_encoding(path):
+    """Load tiktoken Encoding from .pkl."""
+    with open(path, "rb") as f:
+        return pickle.load(f)
 
 
 def _chunk_counts_from_file(path):
@@ -175,16 +152,35 @@ def plot_chunk_distribution(
     return fig
 
 
-def _effective_token_count(flat_ids: list[int], byte_lens: np.ndarray, vocab_size: int) -> float:
-    """Token count when using only the first vocab_size tokens; OOV (id >= vocab_size) counts as its byte length."""
-    n = len(byte_lens)
-    total = 0
-    for tid in flat_ids:
-        if tid < vocab_size:
-            total += 1
-        else:
-            total += byte_lens[tid] if tid < n else 1
-    return total
+def _effective_token_count(
+    doc_strings: list[str],
+    enc: tiktoken.Encoding,
+    vocab_size: int,
+    _truncated_cache: dict | None = None,
+) -> float:
+    """
+    Token count when using only the first vocab_size tokens (standard BPE).
+    Encode each doc with a truncated vocab (first V tokens) and sum lengths;
+    avoids one giant string so encoding is much faster.
+    """
+    if vocab_size not in _truncated_cache:
+        mr = enc._mergeable_ranks
+        truncated_mr = {k: v for k, v in mr.items() if v < vocab_size}
+        _truncated_cache[vocab_size] = tiktoken.Encoding(
+            name=f"trunc_{vocab_size}",
+            pat_str=enc._pat_str,
+            mergeable_ranks=truncated_mr,
+            special_tokens={},
+        )
+    truncated_enc = _truncated_cache[vocab_size]
+    # Debug: print token strings for a 200-char sample (every call)
+    sample = ("".join(doc_strings))[:200] if doc_strings else " " * 200
+    if len(sample) < 200 and doc_strings:
+        sample = (sample + " " * 200)[:200]
+    token_ids = truncated_enc.encode(sample)
+    token_strings = [truncated_enc.decode([tid]) for tid in token_ids]
+    print(f"effective_token_count vocab_size={vocab_size} 200-char sample token strings: {token_strings}")
+    return sum(len(truncated_enc.encode(d)) for d in doc_strings)
 
 
 def plot_bytes_per_token_vs_vocab(
@@ -193,22 +189,20 @@ def plot_bytes_per_token_vs_vocab(
     n_docs: int,
     vocab_sizes: list[int],
     data_dir: str | None = None,
-    doc_cap: int | None = None,
     figsize=(10, 4),
 ):
     """
     Use the same iterator as tok_train: train = first n_docs from split "train",
     val = first n_docs from split "val" (last parquet file). For each tokenizer
     encode and compute bytes/token at each vocab size V (first V tokens). One
-    subplot per tokenizer, stacked vertically.
+    subplot per tokenizer, stacked vertically. Higher is better.
 
     Args:
         dataset_name: Key for DATASET_PATHS (e.g. "c4"); ignored if data_dir set.
         tokenizer_dirs: List of tokenizer directories (each contains tokenizer.pkl).
-        n_docs: Number of docs for train and for val.
+        n_docs: Number of *documents* to use for train and for val (each split gets this many docs).
         vocab_sizes: Vocab sizes to evaluate (first V tokens) per tokenizer.
         data_dir: Override dataset path. If None, use DATASET_PATHS[dataset_name].
-        doc_cap: If set, crop each doc to this many chars (same as tok_train).
         figsize: (width, height_per_subplot); total height = figsize[1] * len(tokenizer_dirs).
 
     Returns:
@@ -218,10 +212,8 @@ def plot_bytes_per_token_vs_vocab(
     if not data_dir or not os.path.isdir(data_dir):
         raise ValueError(f"data_dir must be an existing directory (got dataset_name={dataset_name!r}, data_dir={data_dir!r})")
 
-    train_iter = iter_docs_by_split("train", data_dir, doc_cap=doc_cap)
-    val_iter = iter_docs_by_split("val", data_dir, doc_cap=doc_cap)
-    train_docs = list(itertools.islice(train_iter, n_docs))
-    val_docs = list(itertools.islice(val_iter, n_docs))
+    train_docs = list(iter_docs_by_split(data_dir, "train", max_docs=n_docs))
+    val_docs = list(iter_docs_by_split(data_dir, "val", max_docs=n_docs))
     if len(train_docs) < n_docs:
         raise ValueError(f"Only {len(train_docs)} train docs available, need {n_docs}")
     if len(val_docs) < n_docs:
@@ -239,23 +231,19 @@ def plot_bytes_per_token_vs_vocab(
         pkl_path = os.path.join(tok_dir, "tokenizer.pkl")
         if not os.path.isfile(pkl_path):
             raise FileNotFoundError(f"Tokenizer not found: {pkl_path}")
-        byte_lens = _byte_lens_from_file(pkl_path)
-        tokenizer = RustBPETokenizer.from_directory(tok_dir)
-        n_tokens = len(byte_lens)
+        enc = _load_encoding(pkl_path)
+        n_tokens = len(enc._mergeable_ranks)
         vs_list = [v for v in vocab_sizes if v <= n_tokens]
         if not vs_list:
             raise ValueError(f"No vocab_sizes <= tokenizer size {n_tokens} at {tok_dir}")
 
-        train_ids = tokenizer.encode(train_docs)
-        val_ids = tokenizer.encode(val_docs)
-        flat_train = [tid for doc_ids in train_ids for tid in doc_ids]
-        flat_val = [tid for doc_ids in val_ids for tid in doc_ids]
-
+        trunc_cache = {}
         train_bpt_list = []
         val_bpt_list = []
         for v in vs_list:
-            eff_train = _effective_token_count(flat_train, byte_lens, v)
-            eff_val = _effective_token_count(flat_val, byte_lens, v)
+            print(tok_dir, v)
+            eff_train = _effective_token_count(train_docs, enc, v, _truncated_cache=trunc_cache)
+            eff_val = _effective_token_count(val_docs, enc, v, _truncated_cache=trunc_cache)
             train_bpt_list.append(train_bytes / eff_train if eff_train else 0.0)
             val_bpt_list.append(val_bytes / eff_val if eff_val else 0.0)
 
@@ -295,7 +283,7 @@ if __name__ == "__main__":
             f"{dictionaries_path}/bpe_superchunk_para",
         ],
         10_000,
-        [2**k for k in range(8, 18)],
+        [1_000, 4_000, 16_000, 64_000, 128_000],
     )
     bytes_per_token_vs_vocab.show()
     plt.show()
