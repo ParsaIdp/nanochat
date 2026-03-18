@@ -1,12 +1,12 @@
 import os
 import pickle
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import pyarrow.parquet as pq
 import regex
 import tiktoken
-from multiprocessing import Pool, cpu_count
 
 from nanochat.dataset import list_parquet_files, iter_docs_by_split, iter_numina_math_cot_docs
 
@@ -25,9 +25,17 @@ def _byte_lens_from_file(path):
     """Load a tiktoken Encoding .pkl and return an array of per-token byte lengths."""
     with open(path, "rb") as f:
         enc = pickle.load(f)
-    id_to_bytes = {rank: token for token, rank in enc._mergeable_ranks.items()}
-    byte_lens = [len(id_to_bytes[i]) for i in range(len(id_to_bytes))]
-    return np.array(byte_lens)
+    # enc._mergeable_ranks maps token_bytes -> rank (int). Ranks may not be
+    # perfectly contiguous in [0, len(mapping)), so we build an array of length
+    # max_rank + 1 and fill indices by rank.
+    rank_to_bytes = {rank: token for token, rank in enc._mergeable_ranks.items()}
+    if not rank_to_bytes:
+        return np.array([], dtype=np.int32)
+    max_rank = max(rank_to_bytes.keys())
+    byte_lens = np.zeros(max_rank + 1, dtype=np.int32)
+    for rank, token_bytes in rank_to_bytes.items():
+        byte_lens[rank] = len(token_bytes)
+    return byte_lens
 
 
 def _load_encoding(path):
@@ -40,13 +48,16 @@ def _chunk_counts_from_file(path):
     """Load a tiktoken Encoding .pkl and return per-token chunk counts (GPT-4 regex matches)."""
     with open(path, "rb") as f:
         enc = pickle.load(f)
-    id_to_bytes = {rank: token for token, rank in enc._mergeable_ranks.items()}
-    n = len(id_to_bytes)
-    chunk_counts = np.zeros(n, dtype=np.int64)
-    for i in range(n):
-        token_bytes = id_to_bytes[i]
+    # enc._mergeable_ranks maps token_bytes -> rank (int). Ranks may be sparse,
+    # so build an array indexed by rank up to max_rank.
+    rank_to_bytes = {rank: token for token, rank in enc._mergeable_ranks.items()}
+    if not rank_to_bytes:
+        return np.zeros(0, dtype=np.int64)
+    max_rank = max(rank_to_bytes.keys())
+    chunk_counts = np.zeros(max_rank + 1, dtype=np.int64)
+    for rank, token_bytes in rank_to_bytes.items():
         token_str = token_bytes.decode("utf-8", errors="replace")
-        chunk_counts[i] = len(GPT4_PATTERN.findall(token_str))
+        chunk_counts[rank] = len(GPT4_PATTERN.findall(token_str))
     return chunk_counts
 
 
@@ -125,7 +136,8 @@ def plot_chunk_distribution(
     """
     chunk_counts = _chunk_counts_from_file(f'{dict_filepath}/tokenizer.pkl')
     n_tokens = len(chunk_counts)
-    max_chunks = int(chunk_counts.max())
+    # We only care about chunk counts up to 10
+    max_chunks = min(10, int(chunk_counts.max()))
     vocab_sizes = [vs for vs in vocab_sizes if vs <= n_tokens]
     if not vocab_sizes:
         raise ValueError(f"All requested vocab_sizes exceed tokenizer size {n_tokens}")
@@ -138,7 +150,8 @@ def plot_chunk_distribution(
     for ax, vs in zip(axes, vocab_sizes):
         counts_at_vs = chunk_counts[:vs]
         chunks, num_tokens = np.unique(counts_at_vs, return_counts=True)
-        mask = num_tokens >= min_freq
+        # Keep only chunks up to max_chunks and above the min_freq threshold
+        mask = (chunks <= max_chunks) & (num_tokens >= min_freq)
         chunks = chunks[mask]
         num_tokens = num_tokens[mask]
         ax.bar(chunks, num_tokens, width=0.8, align="center", color="steelblue", edgecolor="navy", alpha=0.8)
@@ -158,60 +171,18 @@ def plot_chunk_distribution(
 _NO_SPLIT_PATTERN = r"[\s\S]+"
 
 
-def _encode_chunk_token_count(args: tuple) -> int:
-    """Worker: (pkl_path, vocab_size, docs_chunk) -> sum of token counts. Used for parallel encoding."""
-    pkl_path, vocab_size, docs_chunk = args
-    enc = _load_encoding(pkl_path)
-    mr = enc._mergeable_ranks
-    truncated_mr = {k: v for k, v in mr.items() if v < vocab_size}
-    truncated_enc = tiktoken.Encoding(
-        name=f"trunc_{vocab_size}",
-        pat_str=_NO_SPLIT_PATTERN,
-        mergeable_ranks=truncated_mr,
-        special_tokens={},
-    )
-    return sum(len(truncated_enc.encode(doc)) for doc in docs_chunk)
-
-
 def _effective_token_count(
     doc_strings: list[str],
     enc: tiktoken.Encoding,
     vocab_size: int,
     _truncated_cache: dict | None = None,
-    *,
-    pkl_path: str | None = None,
-    n_workers: int = 0,
 ) -> float:
     """
     Token count when using only the first vocab_size tokens.
 
     Encodes each document directly with a truncated encoder that has only the
-    first vocab_size merges and uses a no-split pre-tokenization pattern. This
-    gives the exact count (no overcount from expanding OOV pieces separately,
-    which would forbid merges across full-token boundaries).
-
-    When pkl_path is set and n_workers > 0 and len(doc_strings) >= 1000, encoding
-    is done in parallel across chunks for speed.
+    first vocab_size merges and uses a no-split pre-tokenization pattern.
     """
-    n_docs = len(doc_strings)
-    use_parallel = (
-        n_workers > 0
-        and pkl_path is not None
-        and os.path.isfile(pkl_path)
-        and n_docs >= 1000
-    )
-    if use_parallel:
-        n_workers = min(n_workers, n_docs)
-        chunk_size = (n_docs + n_workers - 1) // n_workers
-        chunks = [
-            doc_strings[i : i + chunk_size]
-            for i in range(0, n_docs, chunk_size)
-        ]
-        worker_args = [(pkl_path, vocab_size, chunk) for chunk in chunks]
-        with Pool(processes=n_workers) as pool:
-            counts = pool.map(_encode_chunk_token_count, worker_args)
-        return float(sum(counts))
-    # Single-process path
     if _truncated_cache is None:
         _truncated_cache = {}
     if vocab_size not in _truncated_cache:
@@ -243,7 +214,6 @@ def plot_bytes_per_token_vs_vocab(
     vocab_sizes: list[int],
     data_dir: str | None = None,
     figsize=(10, 4),
-    n_workers: int = 0,
 ):
     """
     Use the same iterator as tok_train: train = first n_docs from split "train",
@@ -258,7 +228,6 @@ def plot_bytes_per_token_vs_vocab(
         vocab_sizes: Vocab sizes to evaluate (first V tokens) per tokenizer.
         data_dir: Override dataset path. Use "nmc" or "numina_math_cot" for NuminaMath-CoT.
         figsize: (width, height_per_subplot); total height = figsize[1] * len(tokenizer_dirs).
-        n_workers: If > 0, encode docs in parallel (faster for large n_docs). 0 = single process.
 
     Returns:
         matplotlib Figure.
@@ -304,14 +273,8 @@ def plot_bytes_per_token_vs_vocab(
         val_bpt_list = []
         for v in vs_list:
             print(tok_dir, v)
-            eff_train = _effective_token_count(
-                train_docs, enc, v, _truncated_cache=trunc_cache,
-                pkl_path=pkl_path, n_workers=n_workers,
-            )
-            eff_val = _effective_token_count(
-                val_docs, enc, v, _truncated_cache=trunc_cache,
-                pkl_path=pkl_path, n_workers=n_workers,
-            )
+            eff_train = _effective_token_count(train_docs, enc, v, _truncated_cache=trunc_cache)
+            eff_val = _effective_token_count(val_docs, enc, v, _truncated_cache=trunc_cache)
             train_bpt_list.append(train_bytes / eff_train if eff_train else 0.0)
             val_bpt_list.append(val_bytes / eff_val if eff_val else 0.0)
 
@@ -331,28 +294,63 @@ def plot_bytes_per_token_vs_vocab(
 
 
 if __name__ == "__main__":
-    dictionaries_path = "c4_dictionaries"
+    parser = argparse.ArgumentParser(description="Evaluate BPE tokenizers with various plots.")
+    parser.add_argument(
+        "--eval",
+        type=str,
+        default="bytes_per_token_vs_vocab",
+        choices=["bytes_per_token", "chunk_distribution", "bytes_per_token_vs_vocab"],
+        help="Which evaluation to run.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="c4",
+        help="Short dataset name (e.g. 'c4', 'nmc'). Used to infer dictionary folder {dataset}_dictionaries and plot output path docs/plots/{dataset}.",
+    )
+    parser.add_argument(
+        "--n_docs",
+        type=int,
+        default=50_000,
+        help="For bytes_per_token_vs_vocab: number of documents/problems per split.",
+    )
+    args = parser.parse_args()
 
-    # bytes_per_token = plot_bytes_per_token(dictionaries_path, [2**k for k in range(8, 18)])
-    # bytes_per_token.show()
-    # plt.show()
-    # bytes_per_token.savefig('docs/plots/bytes_per_token.png')
+    dictionaries_path = f"{args.dataset}_dictionaries"
+    os.makedirs(dictionaries_path, exist_ok=True)
 
-    # chunk_distribution = plot_chunk_distribution(f'{dictionaries_path}/bpe_superchunk_para', [8_000, 32_000, 128_000])
-    # chunk_distribution.show()
-    # plt.show()
-    # chunk_distribution.savefig('docs/plots/chunk_distribution.png')
+    plots_dir = os.path.join("docs", "plots", args.dataset)
+    os.makedirs(plots_dir, exist_ok=True)
 
-    bytes_per_token_vs_vocab = plot_bytes_per_token_vs_vocab(
-        "c4",
-        [
+    if args.eval == "bytes_per_token":
+        vocab_sizes = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000]
+        fig = plot_bytes_per_token(dictionaries_path, vocab_sizes)
+        fig.show()
+        plt.show()
+        fig.savefig(os.path.join(plots_dir, "bytes_per_token.png"))
+    elif args.eval == "chunk_distribution":
+        fig = plot_chunk_distribution(
+            f"{dictionaries_path}/bpe_superchunk_para",
+            [8_000, 32_000, 128_000],
+        )
+        fig.show()
+        plt.show()
+        fig.savefig(os.path.join(plots_dir, "chunk_distribution.png"))
+    else:
+        # bytes_per_token_vs_vocab
+        tokenizer_dirs = [
             f"{dictionaries_path}/bpe",
             f"{dictionaries_path}/bpe_chunk",
             f"{dictionaries_path}/bpe_superchunk_para",
-        ],
-        50_000,
-        [1_000, 4_000, 16_000, 64_000, 128_000]
-    )
-    bytes_per_token_vs_vocab.show()
-    plt.show()
-    bytes_per_token_vs_vocab.savefig('docs/plots/bytes_per_token_vs_vocab.png')
+        ]
+        vocab_sizes = [1_000, 4_000, 16_000, 64_000, 128_000]
+        fig = plot_bytes_per_token_vs_vocab(
+            args.dataset,
+            tokenizer_dirs,
+            args.n_docs,
+            vocab_sizes,
+            data_dir="nmc" if args.dataset == "nmc" else None,
+        )
+        fig.show()
+        plt.show()
+        fig.savefig(os.path.join(plots_dir, "bytes_per_token_vs_vocab.png"))
