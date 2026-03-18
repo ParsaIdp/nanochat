@@ -6,8 +6,9 @@ import matplotlib.cm as cm
 import pyarrow.parquet as pq
 import regex
 import tiktoken
+from multiprocessing import Pool, cpu_count
 
-from nanochat.dataset import list_parquet_files, iter_docs_by_split
+from nanochat.dataset import list_parquet_files, iter_docs_by_split, iter_numina_math_cot_docs
 
 # GPT-4 pre-tokenization pattern: number of chunks per token = len(regex.findall(..., token_str))
 GPT4_PATTERN = regex.compile(
@@ -157,11 +158,29 @@ def plot_chunk_distribution(
 _NO_SPLIT_PATTERN = r"[\s\S]+"
 
 
+def _encode_chunk_token_count(args: tuple) -> int:
+    """Worker: (pkl_path, vocab_size, docs_chunk) -> sum of token counts. Used for parallel encoding."""
+    pkl_path, vocab_size, docs_chunk = args
+    enc = _load_encoding(pkl_path)
+    mr = enc._mergeable_ranks
+    truncated_mr = {k: v for k, v in mr.items() if v < vocab_size}
+    truncated_enc = tiktoken.Encoding(
+        name=f"trunc_{vocab_size}",
+        pat_str=_NO_SPLIT_PATTERN,
+        mergeable_ranks=truncated_mr,
+        special_tokens={},
+    )
+    return sum(len(truncated_enc.encode(doc)) for doc in docs_chunk)
+
+
 def _effective_token_count(
     doc_strings: list[str],
     enc: tiktoken.Encoding,
     vocab_size: int,
     _truncated_cache: dict | None = None,
+    *,
+    pkl_path: str | None = None,
+    n_workers: int = 0,
 ) -> float:
     """
     Token count when using only the first vocab_size tokens.
@@ -170,7 +189,29 @@ def _effective_token_count(
     first vocab_size merges and uses a no-split pre-tokenization pattern. This
     gives the exact count (no overcount from expanding OOV pieces separately,
     which would forbid merges across full-token boundaries).
+
+    When pkl_path is set and n_workers > 0 and len(doc_strings) >= 1000, encoding
+    is done in parallel across chunks for speed.
     """
+    n_docs = len(doc_strings)
+    use_parallel = (
+        n_workers > 0
+        and pkl_path is not None
+        and os.path.isfile(pkl_path)
+        and n_docs >= 1000
+    )
+    if use_parallel:
+        n_workers = min(n_workers, n_docs)
+        chunk_size = (n_docs + n_workers - 1) // n_workers
+        chunks = [
+            doc_strings[i : i + chunk_size]
+            for i in range(0, n_docs, chunk_size)
+        ]
+        worker_args = [(pkl_path, vocab_size, chunk) for chunk in chunks]
+        with Pool(processes=n_workers) as pool:
+            counts = pool.map(_encode_chunk_token_count, worker_args)
+        return float(sum(counts))
+    # Single-process path
     if _truncated_cache is None:
         _truncated_cache = {}
     if vocab_size not in _truncated_cache:
@@ -184,7 +225,6 @@ def _effective_token_count(
         )
     truncated_enc = _truncated_cache[vocab_size]
 
-    # Debug: print token strings for a 200-char sample using only first vocab_size tokens
     sample = ("".join(doc_strings))[:200] if doc_strings else " " * 200
     if len(sample) < 200 and doc_strings:
         sample = (sample + " " * 200)[:200]
@@ -192,7 +232,8 @@ def _effective_token_count(
     token_strings = [truncated_enc.decode([tid]) for tid in token_ids]
     print(f"effective_token_count vocab_size={vocab_size} 200-char sample token strings: {token_strings}")
 
-    return sum(len(truncated_enc.encode(doc)) for doc in doc_strings)
+    total = sum(len(truncated_enc.encode(doc)) for doc in doc_strings)
+    return float(total)
 
 
 def plot_bytes_per_token_vs_vocab(
@@ -202,34 +243,43 @@ def plot_bytes_per_token_vs_vocab(
     vocab_sizes: list[int],
     data_dir: str | None = None,
     figsize=(10, 4),
+    n_workers: int = 0,
 ):
     """
     Use the same iterator as tok_train: train = first n_docs from split "train",
-    val = first n_docs from split "val" (last parquet file). For each tokenizer
-    encode and compute bytes/token at each vocab size V (first V tokens). One
-    subplot per tokenizer, stacked vertically. Higher is better.
+    val = first n_docs from split "val" (parquet) or from "test" (nmc). For each
+    tokenizer encode and compute bytes/token at each vocab size V (first V tokens).
+    One subplot per tokenizer, stacked vertically. Higher is better.
 
     Args:
-        dataset_name: Key for DATASET_PATHS (e.g. "c4"); ignored if data_dir set.
+        dataset_name: Key for DATASET_PATHS (e.g. "c4"), or "nmc" for NuminaMath-CoT.
         tokenizer_dirs: List of tokenizer directories (each contains tokenizer.pkl).
-        n_docs: Number of *documents* to use for train and for val (each split gets this many docs).
+        n_docs: Number of *documents* (or problems for nmc) to use for train and val.
         vocab_sizes: Vocab sizes to evaluate (first V tokens) per tokenizer.
-        data_dir: Override dataset path. If None, use DATASET_PATHS[dataset_name].
+        data_dir: Override dataset path. Use "nmc" or "numina_math_cot" for NuminaMath-CoT.
         figsize: (width, height_per_subplot); total height = figsize[1] * len(tokenizer_dirs).
+        n_workers: If > 0, encode docs in parallel (faster for large n_docs). 0 = single process.
 
     Returns:
         matplotlib Figure.
     """
-    data_dir = data_dir or DATASET_PATHS.get(dataset_name)
-    if not data_dir or not os.path.isdir(data_dir):
-        raise ValueError(f"data_dir must be an existing directory (got dataset_name={dataset_name!r}, data_dir={data_dir!r})")
-
-    train_docs = list(iter_docs_by_split(data_dir, "train", max_docs=n_docs))
-    val_docs = list(iter_docs_by_split(data_dir, "val", max_docs=n_docs))
-    if len(train_docs) < n_docs:
-        raise ValueError(f"Only {len(train_docs)} train docs available, need {n_docs}")
-    if len(val_docs) < n_docs:
-        raise ValueError(f"Only {len(val_docs)} val docs available, need {n_docs}")
+    use_nmc = dataset_name == "nmc" or data_dir in ("nmc", "numina_math_cot")
+    if use_nmc:
+        docs = list(iter_numina_math_cot_docs("train", max_problems=n_docs * 2))
+        train_docs = docs[:n_docs]
+        val_docs = docs[n_docs:]
+        display_name = "nmc"
+    else:
+        data_dir = data_dir or DATASET_PATHS.get(dataset_name)
+        if not data_dir or not os.path.isdir(data_dir):
+            raise ValueError(f"data_dir must be an existing directory (got dataset_name={dataset_name!r}, data_dir={data_dir!r})")
+        train_docs = list(iter_docs_by_split(data_dir, "train", max_docs=n_docs))
+        val_docs = list(iter_docs_by_split(data_dir, "val", max_docs=n_docs))
+        if len(train_docs) < n_docs:
+            raise ValueError(f"Only {len(train_docs)} train docs available, need {n_docs}")
+        if len(val_docs) < n_docs:
+            raise ValueError(f"Only {len(val_docs)} val docs available, need {n_docs}")
+        display_name = dataset_name
 
     train_bytes = sum(len(d.encode("utf-8")) for d in train_docs)
     val_bytes = sum(len(d.encode("utf-8")) for d in val_docs)
@@ -254,8 +304,14 @@ def plot_bytes_per_token_vs_vocab(
         val_bpt_list = []
         for v in vs_list:
             print(tok_dir, v)
-            eff_train = _effective_token_count(train_docs, enc, v, _truncated_cache=trunc_cache)
-            eff_val = _effective_token_count(val_docs, enc, v, _truncated_cache=trunc_cache)
+            eff_train = _effective_token_count(
+                train_docs, enc, v, _truncated_cache=trunc_cache,
+                pkl_path=pkl_path, n_workers=n_workers,
+            )
+            eff_val = _effective_token_count(
+                val_docs, enc, v, _truncated_cache=trunc_cache,
+                pkl_path=pkl_path, n_workers=n_workers,
+            )
             train_bpt_list.append(train_bytes / eff_train if eff_train else 0.0)
             val_bpt_list.append(val_bytes / eff_val if eff_val else 0.0)
 
@@ -269,13 +325,13 @@ def plot_bytes_per_token_vs_vocab(
         ax.grid(True, which="both", linestyle="--", alpha=0.4)
 
     axes[-1].set_xlabel("Vocabulary size (first V tokens)")
-    fig.suptitle(f"Bytes per token vs vocab size ({dataset_name}, n_docs={n_docs:,})", y=1.02)
+    fig.suptitle(f"Bytes per token vs vocab size ({display_name}, n_docs={n_docs:,})", y=1.02)
     plt.tight_layout()
     return fig
 
 
 if __name__ == "__main__":
-    dictionaries_path = "c4_dictionaries"
+    dictionaries_path = "nmc_dictionaries"
 
     # bytes_per_token = plot_bytes_per_token(dictionaries_path, [2**k for k in range(8, 18)])
     # bytes_per_token.show()
@@ -288,14 +344,14 @@ if __name__ == "__main__":
     # chunk_distribution.savefig('docs/plots/chunk_distribution.png')
 
     bytes_per_token_vs_vocab = plot_bytes_per_token_vs_vocab(
-        "c4",
+        "nmc",
         [
             f"{dictionaries_path}/bpe",
             f"{dictionaries_path}/bpe_chunk",
             f"{dictionaries_path}/bpe_superchunk_para",
         ],
-        1_000,
-        [1_000, 4_000, 16_000, 64_000, 128_000],
+        50_000,
+        [1_000, 4_000, 16_000, 64_000, 128_000]
     )
     bytes_per_token_vs_vocab.show()
     plt.show()
