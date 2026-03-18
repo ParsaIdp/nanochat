@@ -16,8 +16,10 @@ GPT4_PATTERN = regex.compile(
 )
 
 # Dataset name -> data dir for parquet shards (override with data_dir when calling)
+# Resolve paths relative to the project root (repo root containing this script).
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 DATASET_PATHS = {
-    "c4": r"C:\large_storage\c4",
+    "c4": os.path.join(PROJECT_ROOT, "c4"),
 }
 
 
