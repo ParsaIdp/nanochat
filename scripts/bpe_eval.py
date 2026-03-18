@@ -331,7 +331,7 @@ def plot_bytes_per_token_vs_vocab(
 
 
 if __name__ == "__main__":
-    dictionaries_path = "nmc_dictionaries"
+    dictionaries_path = "c4_dictionaries"
 
     # bytes_per_token = plot_bytes_per_token(dictionaries_path, [2**k for k in range(8, 18)])
     # bytes_per_token.show()
@@ -344,7 +344,7 @@ if __name__ == "__main__":
     # chunk_distribution.savefig('docs/plots/chunk_distribution.png')
 
     bytes_per_token_vs_vocab = plot_bytes_per_token_vs_vocab(
-        "nmc",
+        "c4",
         [
             f"{dictionaries_path}/bpe",
             f"{dictionaries_path}/bpe_chunk",
