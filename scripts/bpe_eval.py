@@ -694,7 +694,7 @@ if __name__ == "__main__":
         plt.show()
         fig.savefig(os.path.join(plots_dir, f"bytes_per_cot_len_{args.dataset}.png"))
     elif args.eval == "plot_cot_entropy":
-        fig = plot_cot_entropy(max_problems=cot_entropy_n)
+        fig = plot_cot_entropy(max_problems=args.max_problems)
         fig.show()
         plt.show()
         fig.savefig(os.path.join(plots_dir, "plot_cot_entropy.png"))
