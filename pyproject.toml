@@ -13,6 +13,7 @@ dependencies = [
     "rustbpe @ git+https://github.com/eshansinghal14/rustbpe.git@master",
     "setuptools>=80.9.0",
     "tiktoken>=0.11.0",
+    "transformers>=4.40.0",
     "tokenizers>=0.22.0",
     "torch>=2.8.0",
     "uvicorn>=0.36.0",
