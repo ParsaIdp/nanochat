@@ -1,7 +1,6 @@
 import os
 import pickle
 import argparse
-import textwrap
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -530,20 +529,6 @@ def _iter_numina_problems(max_problems: int | None):
             yield p
 
 
-def _mpl_parse_math_false_kwargs() -> dict:
-    """``parse_math=False`` so dataset LaTeX (e.g. ``\\displaystyle``) is not parsed as mathtext."""
-    try:
-        import matplotlib
-
-        parts = matplotlib.__version__.split(".")[:2]
-        major, minor = int(parts[0]), int(parts[1])
-        if major > 3 or (major == 3 and minor >= 6):
-            return {"parse_math": False}
-    except (ValueError, IndexError):
-        pass
-    return {}
-
-
 def _entropy_from_logits(logits: "torch.Tensor") -> float:
     import torch
     import torch.nn.functional as F
@@ -598,7 +583,8 @@ def plot_cot_entropy(
     then plot **token index** (0 = first generated token) vs. **entropy** of
     the next-token distribution at each step (softmax entropy over the vocab).
 
-    Writes **one page per problem** to ``pdf_path`` (multi-page PDF).
+    Writes **one page per non-empty plot** to ``pdf_path`` (multi-page PDF).
+    Skips problems with no generation scores or no tokens to plot.
 
     Default checkpoint ``meta-llama/Llama-3.2-1B``; uses chat template when
     present, else a plain ``Problem: / Solution:`` prompt. Set ``HF_TOKEN`` for
@@ -645,6 +631,8 @@ def plot_cot_entropy(
 
             entropies = [_entropy_from_logits(s[0].float()) for s in scores]
             xs = np.arange(len(entropies))
+            if len(entropies) == 0:
+                continue
 
             fig, ax = plt.subplots(figsize=figsize)
             ax.plot(xs, entropies, color="C0", linewidth=1.2)
@@ -654,29 +642,7 @@ def plot_cot_entropy(
                 f"Problem {p_idx + 1} — per-token entropy ({model_name})"
             )
             ax.grid(True, which="both", linestyle="--", alpha=0.4)
-            preview = textwrap.fill(
-                problem[:600].replace("\n", " "),
-                width=92,
-            )
-            if len(problem) > 600:
-                preview = preview.rstrip() + "…"
-            kw = _mpl_parse_math_false_kwargs()
-            if not kw:
-                # Matplotlib <3.6: no parse_math; use fullwidth backslash so mathtext
-                # does not treat ``\displaystyle`` etc. as commands.
-                preview = preview.replace("\\", "\uff3c")
-            fig.text(
-                0.5,
-                0.01,
-                preview,
-                ha="center",
-                va="bottom",
-                fontsize=7,
-                transform=fig.transFigure,
-                family="sans-serif",
-                **kw,
-            )
-            fig.subplots_adjust(bottom=0.22)
+            plt.tight_layout()
             pdf.savefig(fig, bbox_inches="tight", pad_inches=0.35)
             plt.close(fig)
             n_written += 1
