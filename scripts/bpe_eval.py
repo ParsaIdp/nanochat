@@ -537,6 +537,38 @@ def _entropy_from_logits(logits: "torch.Tensor") -> float:
     return float(-(p * log_p).sum().item())
 
 
+_logged_in_hf = False
+
+
+def load_model(model_name: str):
+    """Load a HF causal LM + tokenizer; logs in once via ``HF_TOKEN`` when set."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers.utils import logging as hf_logging
+    from huggingface_hub import login
+
+    hf_logging.set_verbosity_error()
+
+    global _logged_in_hf
+    if not _logged_in_hf:
+        token = os.environ.get("HF_TOKEN")
+        if token:
+            login(token=token)
+        else:
+            login()
+        _logged_in_hf = True
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16 if device == "cuda" else None,
+    ).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    return model, tokenizer
+
+
 def plot_cot_entropy(
     *,
     max_problems: int,
@@ -552,21 +584,13 @@ def plot_cot_entropy(
     All problems are drawn on one axes with semi-transparent lines.
 
     Default checkpoint ``meta-llama/Llama-3.2-1B``; uses chat template when
-    present, else a plain ``Problem: / Solution:`` prompt. Gated models require
-    HF login / ``HF_TOKEN``.
+    present, else a plain ``Problem: / Solution:`` prompt. Set ``HF_TOKEN`` for
+    gated models (``load_model`` calls ``huggingface_hub.login`` once).
     """
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype)
+    model, tokenizer = load_model(model_name)
     model.eval()
-    if torch.cuda.is_available():
-        model = model.to("cuda")
     device = next(model.parameters()).device
     fig, ax = plt.subplots(figsize=figsize)
 
