@@ -1,9 +1,11 @@
 import os
 import pickle
 import argparse
+import textwrap
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+from matplotlib.backends.backend_pdf import PdfPages
 import pyarrow.parquet as pq
 import regex
 import tiktoken
@@ -572,74 +574,96 @@ def load_model(model_name: str):
 def plot_cot_entropy(
     *,
     max_problems: int,
+    pdf_path: str,
     model_name: str = "meta-llama/Llama-3.2-1B",
     max_new_tokens: int = 512,
     figsize=(10, 6),
-):
+) -> str:
     """
     NuminaMath-CoT: for each problem, generate a response with a Llama causal LM,
     then plot **token index** (0 = first generated token) vs. **entropy** of
     the next-token distribution at each step (softmax entropy over the vocab).
 
-    All problems are drawn on one axes with semi-transparent lines.
+    Writes **one page per problem** to ``pdf_path`` (multi-page PDF).
 
     Default checkpoint ``meta-llama/Llama-3.2-1B``; uses chat template when
     present, else a plain ``Problem: / Solution:`` prompt. Set ``HF_TOKEN`` for
     gated models (``load_model`` calls ``huggingface_hub.login`` once).
+
+    Returns:
+        Path to the PDF written.
     """
     import torch
 
     model, tokenizer = load_model(model_name)
     model.eval()
     device = next(model.parameters()).device
-    fig, ax = plt.subplots(figsize=figsize)
 
-    for p_idx, problem in enumerate(_iter_numina_problems(max_problems)):
-        if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
-            messages = [{"role": "user", "content": problem}]
-            input_ids = tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                return_tensors="pt",
-            ).to(device)
-        else:
-            input_ids = tokenizer(
-                f"Problem:\n{problem}\n\nSolution:",
-                return_tensors="pt",
-            ).input_ids.to(device)
+    n_written = 0
+    with PdfPages(pdf_path) as pdf:
+        for p_idx, problem in enumerate(_iter_numina_problems(max_problems)):
+            if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
+                messages = [{"role": "user", "content": problem}]
+                input_ids = tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                ).to(device)
+            else:
+                input_ids = tokenizer(
+                    f"Problem:\n{problem}\n\nSolution:",
+                    return_tensors="pt",
+                ).input_ids.to(device)
 
-        with torch.no_grad():
-            out = model.generate(
-                input_ids,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id,
-                output_scores=True,
-                return_dict_in_generate=True,
+            with torch.no_grad():
+                out = model.generate(
+                    input_ids,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                    output_scores=True,
+                    return_dict_in_generate=True,
+                )
+
+            scores = out.scores
+            if not scores:
+                continue
+
+            entropies = [_entropy_from_logits(s[0].float()) for s in scores]
+            xs = np.arange(len(entropies))
+
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.plot(xs, entropies, color="C0", linewidth=1.2)
+            ax.set_xlabel("Generated token index")
+            ax.set_ylabel("Entropy (nats, next-token distribution)")
+            ax.set_title(
+                f"Problem {p_idx + 1} — per-token entropy ({model_name})"
             )
+            ax.grid(True, which="both", linestyle="--", alpha=0.4)
+            preview = textwrap.fill(
+                problem[:600].replace("\n", " "),
+                width=92,
+            )
+            if len(problem) > 600:
+                preview = preview.rstrip() + "…"
+            fig.text(
+                0.5,
+                0.01,
+                preview,
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                transform=fig.transFigure,
+                family="sans-serif",
+            )
+            fig.subplots_adjust(bottom=0.22)
+            pdf.savefig(fig, bbox_inches="tight", pad_inches=0.35)
+            plt.close(fig)
+            n_written += 1
 
-        scores = out.scores
-        if not scores:
-            continue
-
-        entropies = [_entropy_from_logits(s[0].float()) for s in scores]
-        xs = np.arange(len(entropies))
-        ax.plot(
-            xs,
-            entropies,
-            alpha=0.35,
-            linewidth=1.2,
-            color=f"C{p_idx % 10}",
-        )
-
-    ax.set_xlabel("Generated token index")
-    ax.set_ylabel("Entropy (nats, next-token distribution)")
-    ax.set_title(
-        f"Per-token entropy vs. position ({max_problems} problems, {model_name})"
-    )
-    ax.grid(True, which="both", linestyle="--", alpha=0.4)
-    plt.tight_layout()
-    return fig
+    if n_written == 0:
+        raise ValueError("No pages written to PDF (no valid generations).")
+    return pdf_path
 
 
 if __name__ == "__main__":
@@ -718,10 +742,9 @@ if __name__ == "__main__":
         plt.show()
         fig.savefig(os.path.join(plots_dir, f"bytes_per_cot_len_{args.dataset}.png"))
     elif args.eval == "plot_cot_entropy":
-        fig = plot_cot_entropy(max_problems=args.max_problems)
-        fig.show()
-        plt.show()
-        fig.savefig(os.path.join(plots_dir, "plot_cot_entropy.png"))
+        cot_n = args.max_problems if args.max_problems is not None else 5
+        pdf_out = os.path.join(plots_dir, "plot_cot_entropy.pdf")
+        plot_cot_entropy(max_problems=cot_n, pdf_path=pdf_out)
     elif args.eval == "chunk_distribution":
         fig = plot_chunk_distribution(
             f"{dictionaries_path}/bpe_superchunk_para",
