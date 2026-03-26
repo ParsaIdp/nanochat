@@ -530,6 +530,20 @@ def _iter_numina_problems(max_problems: int | None):
             yield p
 
 
+def _mpl_parse_math_false_kwargs() -> dict:
+    """``parse_math=False`` so dataset LaTeX (e.g. ``\\displaystyle``) is not parsed as mathtext."""
+    try:
+        import matplotlib
+
+        parts = matplotlib.__version__.split(".")[:2]
+        major, minor = int(parts[0]), int(parts[1])
+        if major > 3 or (major == 3 and minor >= 6):
+            return {"parse_math": False}
+    except (ValueError, IndexError):
+        pass
+    return {}
+
+
 def _entropy_from_logits(logits: "torch.Tensor") -> float:
     import torch
     import torch.nn.functional as F
@@ -646,6 +660,11 @@ def plot_cot_entropy(
             )
             if len(problem) > 600:
                 preview = preview.rstrip() + "…"
+            kw = _mpl_parse_math_false_kwargs()
+            if not kw:
+                # Matplotlib <3.6: no parse_math; use fullwidth backslash so mathtext
+                # does not treat ``\displaystyle`` etc. as commands.
+                preview = preview.replace("\\", "\uff3c")
             fig.text(
                 0.5,
                 0.01,
@@ -655,6 +674,7 @@ def plot_cot_entropy(
                 fontsize=7,
                 transform=fig.transFigure,
                 family="sans-serif",
+                **kw,
             )
             fig.subplots_adjust(bottom=0.22)
             pdf.savefig(fig, bbox_inches="tight", pad_inches=0.35)
