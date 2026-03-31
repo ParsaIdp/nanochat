@@ -33,6 +33,12 @@ parser.add_argument('--data_dir', type=str, default=None, help='Directory contai
 parser.add_argument('--no_chunking', action='store_true', help='Disable GPT-4 regex chunking (train BPE on raw bytes)')
 parser.add_argument('--allow_superchunk', action='store_true', help='Allow superchunking')
 parser.add_argument('--max_superchunk_chunks', type=int, default=0, help='Maximum chunks per superchunk when --allow_superchunk (0 = no cap)')
+parser.add_argument(
+    '--max_superchunk_merges',
+    type=int,
+    default=None,
+    help='Optional cap on Phase 2 (superchunk) merges (rustbpe); omit for no cap',
+)
 parser.add_argument('--superchunk_pattern', type=str, default=None, help='Regex pattern for superchunking')
 
 args = parser.parse_args()
@@ -45,6 +51,7 @@ logger.info(f"data_dir: {args.data_dir}")
 logger.info(f"no_chunking: {args.no_chunking}")
 logger.info(f"allow_superchunk: {args.allow_superchunk}")
 logger.info(f"max_superchunk_chunks: {args.max_superchunk_chunks}")
+logger.info(f"max_superchunk_merges: {args.max_superchunk_merges}")
 # -----------------------------------------------------------------------------
 # Text iterator (shared with bpe_eval via nanochat.dataset when using parquet)
 
@@ -76,6 +83,7 @@ tokenizer = RustBPETokenizer.train_from_iterator(
     args.vocab_size,
     allow_superchunk=args.allow_superchunk,
     max_superchunk_chunks=args.max_superchunk_chunks,
+    max_superchunk_merges=args.max_superchunk_merges,
     tokenizer_dir=tokenizer_dir,
     **train_kwargs,
 )

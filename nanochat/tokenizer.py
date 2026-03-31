@@ -343,6 +343,7 @@ class RustBPETokenizer:
         allow_superchunk: bool,
         pattern: str = SPLIT_PATTERN,
         max_superchunk_chunks: int = 0,
+        max_superchunk_merges: int | None = None,
         tokenizer_dir: str | None = None,
         chunk_pattern: str | None = None,
         superchunk_pattern: str | None = None,
@@ -364,6 +365,8 @@ class RustBPETokenizer:
             train_kwargs["tokenizer_dir"] = tokenizer_dir
         if superchunk_pattern is not None:
             train_kwargs["superchunk_pattern"] = superchunk_pattern
+        if max_superchunk_merges is not None:
+            train_kwargs["max_superchunk_merges"] = max_superchunk_merges
         tokenizer.train_from_iterator(text_iterator, **train_kwargs)
         # 2) construct the associated tiktoken encoding for inference
         pattern = tokenizer.get_pattern()
