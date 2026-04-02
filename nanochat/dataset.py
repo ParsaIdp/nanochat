@@ -55,6 +55,23 @@ def load_numina_math_cot(split: str = "train", *, cache_subdir: str = "numina_ma
     return load_dataset("AI-MO/NuminaMath-CoT", split=split, cache_dir=cache_dir)
 
 
+def _numina_first_generation_text(row: dict) -> str | None:
+    """Return ``generations[0]`` as a string if present and non-empty, else None."""
+    gens = row.get("generations")
+    if gens is None:
+        return None
+    if isinstance(gens, (list, tuple)) and len(gens) == 0:
+        return None
+    g0 = gens[0]
+    if g0 is None:
+        return None
+    if isinstance(g0, str):
+        t = g0.strip()
+    else:
+        t = str(g0).strip()
+    return t if t else None
+
+
 def iter_numina_math_cot_docs(
     split: str = "train",
     *,
@@ -62,8 +79,11 @@ def iter_numina_math_cot_docs(
     cache_subdir: str = "numina_math_cot",
 ) -> Generator[str, None, None]:
     """
-    Iterate over NuminaMath-CoT documents (one per problem): each yielded string is
-    the concatenation of problem and solution for one example.
+    Iterate over NuminaMath-CoT documents (one per problem).
+
+    When the row has a ``generations`` field, uses **only** ``generations[0]`` as the
+    document (LLM trace to train on), not the gold ``solution``. If ``generations`` is
+    missing or empty, falls back to ``problem + solution`` for older dataset revisions.
 
     Args:
         split: Dataset split (e.g. "train").
@@ -71,15 +91,19 @@ def iter_numina_math_cot_docs(
         cache_subdir: Subdir under base dir for HF cache.
 
     Yields:
-        One document string per problem (problem + solution text).
+        One document string per problem.
     """
     ds = load_numina_math_cot(split=split, cache_subdir=cache_subdir)
     for i, row in enumerate(ds):
         if max_problems is not None and i >= max_problems:
             break
-        problem = row.get("problem") or ""
-        solution = row.get("solution") or ""
-        doc = f"{problem}\n\n{solution}".strip()
+        trace = _numina_first_generation_text(row)
+        if trace is not None:
+            doc = trace
+        else:
+            problem = row.get("problem") or ""
+            solution = row.get("solution") or ""
+            doc = f"{problem}\n\n{solution}".strip()
         if doc:
             yield doc
 
