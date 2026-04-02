@@ -702,16 +702,30 @@ def grade_numina_boxed(pred_response: str, gold_solution: str) -> tuple[bool | N
     return ok, g, p
 
 
+# Latest Sonnet on the Anthropic API (see https://docs.anthropic.com/en/docs/about-claude/models).
+DEFAULT_CLAUDE_SONNET_MODEL = "claude-sonnet-4-6"
+
+
+def _anthropic_api_key() -> str:
+    """Resolve API key; newer anthropic SDKs require ``api_key=`` explicitly (env alone may not suffice)."""
+    key = (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+    if not key:
+        raise RuntimeError(
+            "Anthropic API key not set. Set ANTHROPIC_API_KEY to your key "
+            "(https://console.anthropic.com/settings/keys). "
+            "Example (PowerShell): $env:ANTHROPIC_API_KEY='sk-ant-api03-...'"
+        )
+    return key
+
+
 def _anthropic_message_text(
     *,
+    client: object,
     user: str,
     system: str | None,
     model: str,
     max_tokens: int,
 ) -> str:
-    import anthropic
-
-    client = anthropic.Anthropic()
     kwargs: dict = {
         "model": model,
         "max_tokens": max_tokens,
@@ -743,7 +757,11 @@ def run_nmc_claude_prompt_compare(
     as the system prompt plus the same question. Grades via last ``\\boxed{...}`` in
     the gold solution vs. each response. Writes JSON to the dictionary folder and
     returns the same structure.
+
+    Requires ``ANTHROPIC_API_KEY`` in the environment (passed explicitly to the client).
     """
+    import anthropic
+
     dict_dir = os.path.abspath(dictionary_path)
     prompt_path = os.path.join(dict_dir, prompt_filename)
     if not os.path.isfile(prompt_path):
@@ -755,7 +773,8 @@ def run_nmc_claude_prompt_compare(
     with open(prompt_path, encoding="utf-8") as f:
         system_prompt = f.read()
 
-    model = model or os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+    model = model or os.environ.get("ANTHROPIC_MODEL", DEFAULT_CLAUDE_SONNET_MODEL)
+    client = anthropic.Anthropic(api_key=_anthropic_api_key())
 
     results_rows: list[dict] = []
     gradable_standard: list[bool] = []
@@ -773,6 +792,7 @@ def run_nmc_claude_prompt_compare(
         if sleep_s > 0:
             time.sleep(sleep_s)
         response_standard = _anthropic_message_text(
+            client=client,
             user=user_content,
             system=None,
             model=model,
@@ -781,6 +801,7 @@ def run_nmc_claude_prompt_compare(
         if sleep_s > 0:
             time.sleep(sleep_s)
         response_with_prompt = _anthropic_message_text(
+            client=client,
             user=user_content,
             system=system_prompt,
             model=model,
@@ -1023,7 +1044,7 @@ if __name__ == "__main__":
         "--claude_model",
         type=str,
         default=None,
-        help="For nmc_claude_prompt_compare: Anthropic model id (default: env ANTHROPIC_MODEL or claude-3-5-haiku-20241022).",
+        help="For nmc_claude_prompt_compare: Anthropic model id (default: env ANTHROPIC_MODEL or claude-sonnet-4-6).",
     )
     parser.add_argument(
         "--claude_max_tokens",
