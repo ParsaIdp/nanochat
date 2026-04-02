@@ -1,5 +1,7 @@
 import os
 import sys
+import json
+import time
 import pickle
 import argparse
 import numpy as np
@@ -84,7 +86,6 @@ def superchunk_llm_prompt_from_dictionary(
     dictionary_path: str,
     *,
     min_token_id: int = 256,
-    max_examples: int = 80,
     token_mapping_filename: str = "token_mapping",
     example_display_max_len: int = 64,
     save_path: str | None = None,
@@ -104,8 +105,6 @@ def superchunk_llm_prompt_from_dictionary(
     merged = sorted(
         (tid, s) for tid, s in id_to_str.items() if tid >= min_token_id
     )
-    n_total = len(merged)
-    shown = merged[:max_examples]
 
     def literal_line(token_str: str) -> str:
         one_line = token_str.replace("\n", " ").replace("\r", "")
@@ -113,21 +112,15 @@ def superchunk_llm_prompt_from_dictionary(
             one_line = one_line[: example_display_max_len - 1] + "..."
         return f"[{one_line}→]"
 
-    example_lines = [literal_line(s) for _, s in shown]
+    example_lines = [literal_line(s) for _, s in merged]
     examples_block = "\n".join(f"- {line}" for line in example_lines)
-    more_note = ""
-    if n_total > len(shown):
-        more_note = (
-            f"\n\n(Showing {len(shown)} of {n_total} tokens with id >= {min_token_id}; "
-            "the full vocabulary includes additional merged tokens.)"
-        )
 
     text = f"""You have access to a compressed token vocabulary: some longer spans can be written as single tokens (ids >= {min_token_id}, i.e. beyond the raw byte vocabulary). When that is appropriate, you may express such a span as a **literal** bracket-and-arrow string: `[text→]` — for example `[United States→]` denotes the single token whose decoded text is that phrase (the arrow is part of the literal form for this setting).
 
 **How to use this:** Follow your **normal reasoning chain** (steps, algebra, verification) as you usually would. **Do not** force or sprinkle compressed forms just to use them; only use them when they fit naturally. If you do use one, write it **exactly** as a literal in this `[…→]` form so it can align with a single token.
 
-**Example literal forms** from this tokenizer's mapping (ids >= {min_token_id}):
-{examples_block}{more_note}
+**Example literal forms** from this tokenizer's mapping (ids >= {min_token_id}; all listed):
+{examples_block}
 """
     if save_path:
         with open(save_path, "w", encoding="utf-8", newline="\n") as f:
@@ -640,6 +633,216 @@ def _iter_numina_problems(max_problems: int | None):
             yield p
 
 
+def iter_numina_problem_solution_rows(max_problems: int | None):
+    """Yield ``{index, problem, solution}`` rows from NuminaMath-CoT train split."""
+    from nanochat.dataset import load_numina_math_cot
+
+    ds = load_numina_math_cot(split="train")
+    for i, row in enumerate(ds):
+        if max_problems is not None and i >= max_problems:
+            break
+        problem = (row.get("problem") or "").strip()
+        solution = (row.get("solution") or "").strip()
+        if problem:
+            yield {"index": i, "problem": problem, "solution": solution}
+
+
+def _extract_last_boxed(text: str) -> str | None:
+    """Return the contents of the last ``\\boxed{...}``, with nested-brace support."""
+    needle = "\\boxed"
+    pos = 0
+    last: str | None = None
+    while True:
+        i = text.find(needle, pos)
+        if i == -1:
+            break
+        j = i + len(needle)
+        while j < len(text) and text[j].isspace():
+            j += 1
+        if j >= len(text) or text[j] != "{":
+            pos = i + 1
+            continue
+        depth = 0
+        k = j
+        while k < len(text):
+            if text[k] == "{":
+                depth += 1
+            elif text[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    last = text[j + 1 : k].strip()
+                    break
+            k += 1
+        pos = i + 1
+    return last
+
+
+def _normalize_boxed_answer(s: str) -> str:
+    t = s.strip()
+    if t.startswith("$") and t.endswith("$") and len(t) >= 2:
+        t = t[1:-1].strip()
+    return t
+
+
+def grade_numina_boxed(pred_response: str, gold_solution: str) -> tuple[bool | None, str | None, str | None]:
+    """
+    Compare last ``\\boxed{...}`` in the model response to that in the gold solution.
+
+    Returns:
+        (is_correct, gold_boxed, pred_boxed) — ``is_correct`` is ``None`` if the
+        gold solution has no parseable ``\\boxed`` (problem skipped for accuracy).
+    """
+    g = _extract_last_boxed(gold_solution)
+    if g is None:
+        return None, None, _extract_last_boxed(pred_response)
+    p = _extract_last_boxed(pred_response)
+    if p is None:
+        return False, g, None
+    ok = _normalize_boxed_answer(p) == _normalize_boxed_answer(g)
+    return ok, g, p
+
+
+def _anthropic_message_text(
+    *,
+    user: str,
+    system: str | None,
+    model: str,
+    max_tokens: int,
+) -> str:
+    import anthropic
+
+    client = anthropic.Anthropic()
+    kwargs: dict = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": user}],
+    }
+    if system:
+        kwargs["system"] = system
+    msg = client.messages.create(**kwargs)
+    parts: list[str] = []
+    for block in msg.content:
+        if getattr(block, "type", None) == "text":
+            parts.append(getattr(block, "text", "") or "")
+    return "".join(parts)
+
+
+def run_nmc_claude_prompt_compare(
+    dictionary_path: str,
+    *,
+    max_problems: int | None,
+    model: str | None = None,
+    max_tokens: int = 4096,
+    sleep_s: float = 0.0,
+    prompt_filename: str = "superchunk_llm_prompt.txt",
+    results_filename: str = "nmc_claude_prompt_compare.json",
+) -> dict:
+    """
+    For each NuminaMath-CoT problem (up to ``max_problems``), call Claude twice:
+    once with only the question, once with ``dictionary_path`` / ``prompt_filename``
+    as the system prompt plus the same question. Grades via last ``\\boxed{...}`` in
+    the gold solution vs. each response. Writes JSON to the dictionary folder and
+    returns the same structure.
+    """
+    dict_dir = os.path.abspath(dictionary_path)
+    prompt_path = os.path.join(dict_dir, prompt_filename)
+    if not os.path.isfile(prompt_path):
+        raise FileNotFoundError(
+            f"Missing {prompt_path}. Generate it with "
+            f"`python scripts/bpe_eval.py --eval superchunk_prompt --dictionary {dictionary_path}` "
+            "or pass a custom --nmc_prompt_file."
+        )
+    with open(prompt_path, encoding="utf-8") as f:
+        system_prompt = f.read()
+
+    model = model or os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+
+    results_rows: list[dict] = []
+    gradable_standard: list[bool] = []
+    gradable_prompted: list[bool] = []
+
+    user_instruction = (
+        "Solve the following problem. Put your final answer in \\boxed{...} using LaTeX."
+    )
+
+    for row in iter_numina_problem_solution_rows(max_problems):
+        problem = row["problem"]
+        solution = row["solution"]
+        user_content = f"{user_instruction}\n\n{problem}"
+
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+        response_standard = _anthropic_message_text(
+            user=user_content,
+            system=None,
+            model=model,
+            max_tokens=max_tokens,
+        )
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+        response_with_prompt = _anthropic_message_text(
+            user=user_content,
+            system=system_prompt,
+            model=model,
+            max_tokens=max_tokens,
+        )
+
+        ok_std, gold_b, pred_std = grade_numina_boxed(response_standard, solution)
+        ok_pr, _, pred_pr = grade_numina_boxed(response_with_prompt, solution)
+
+        rec = {
+            "index": row["index"],
+            "question": problem,
+            "gold_boxed": gold_b,
+            "standard_response": response_standard,
+            "response_given_prompt": response_with_prompt,
+            "pred_boxed_standard": pred_std,
+            "pred_boxed_with_prompt": pred_pr,
+            "correct_standard": ok_std,
+            "correct_with_prompt": ok_pr,
+        }
+        results_rows.append(rec)
+
+        if ok_std is not None:
+            gradable_standard.append(bool(ok_std))
+        if ok_pr is not None:
+            gradable_prompted.append(bool(ok_pr))
+
+    def _acc(correct: list[bool]) -> float | None:
+        return sum(1 for x in correct if x) / len(correct) if correct else None
+
+    acc_std = _acc(gradable_standard)
+    acc_pr = _acc(gradable_prompted)
+    n_std = len(gradable_standard)
+    n_pr = len(gradable_prompted)
+    ok_std = sum(gradable_standard)
+    ok_pr = sum(gradable_prompted)
+
+    out = {
+        "meta": {
+            "dictionary": dict_dir,
+            "prompt_file": os.path.basename(prompt_path),
+            "model": model,
+            "max_problems_requested": max_problems,
+            "n_problems": len(results_rows),
+            "n_gradable_standard": n_std,
+            "n_gradable_with_prompt": n_pr,
+            "correct_count_standard": ok_std,
+            "correct_count_with_prompt": ok_pr,
+            "accuracy_standard": acc_std,
+            "accuracy_with_prompt": acc_pr,
+            "grading": "last \\boxed{...} in model output vs gold solution (string match after light normalization)",
+        },
+        "results": results_rows,
+    }
+
+    out_path = os.path.join(dict_dir, results_filename)
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+
+    return out
+
+
 def _entropy_from_logits(logits: "torch.Tensor") -> float:
     import torch
     import torch.nn.functional as F
@@ -776,6 +979,7 @@ if __name__ == "__main__":
             "bytes_per_cot_len",
             "plot_cot_entropy",
             "superchunk_prompt",
+            "nmc_claude_prompt_compare",
         ],
         help="Which evaluation to run.",
     )
@@ -802,7 +1006,7 @@ if __name__ == "__main__":
         "--max_problems",
         type=int,
         default=None,
-        help="For bytes_per_cot_len: max NuminaMath-CoT problems (default: all). For plot_cot_entropy: number of problems (default: 5 if omitted).",
+        help="For bytes_per_cot_len: max NuminaMath-CoT problems (default: all). For plot_cot_entropy: number of problems (default: 5 if omitted). For nmc_claude_prompt_compare: required (caps train problems).",
     )
     parser.add_argument(
         "--dictionary",
@@ -811,17 +1015,79 @@ if __name__ == "__main__":
         help="For superchunk_prompt: path to tokenizer directory (token_mapping or tokenizer.pkl inside).",
     )
     parser.add_argument(
-        "--superchunk_max_examples",
-        type=int,
-        default=80,
-        help="For superchunk_prompt: max example literals to list (default: 80).",
-    )
-    parser.add_argument(
         "--superchunk_no_save",
         action="store_true",
         help="For superchunk_prompt: do not write superchunk_llm_prompt.txt under --dictionary.",
     )
+    parser.add_argument(
+        "--claude_model",
+        type=str,
+        default=None,
+        help="For nmc_claude_prompt_compare: Anthropic model id (default: env ANTHROPIC_MODEL or claude-3-5-haiku-20241022).",
+    )
+    parser.add_argument(
+        "--claude_max_tokens",
+        type=int,
+        default=4096,
+        help="For nmc_claude_prompt_compare: max tokens per completion.",
+    )
+    parser.add_argument(
+        "--claude_sleep",
+        type=float,
+        default=0.0,
+        help="For nmc_claude_prompt_compare: seconds to sleep between API calls (rate limits).",
+    )
+    parser.add_argument(
+        "--nmc_prompt_file",
+        type=str,
+        default="superchunk_llm_prompt.txt",
+        help="For nmc_claude_prompt_compare: prompt filename inside --dictionary (default: superchunk_llm_prompt.txt).",
+    )
+    parser.add_argument(
+        "--nmc_results_file",
+        type=str,
+        default="nmc_claude_prompt_compare.json",
+        help="For nmc_claude_prompt_compare: JSON output filename inside --dictionary.",
+    )
     args = parser.parse_args()
+
+    if args.eval == "nmc_claude_prompt_compare":
+        if not args.dictionary:
+            parser.error("--dictionary is required for --eval nmc_claude_prompt_compare")
+        if args.max_problems is None:
+            parser.error(
+                "--max_problems is required for nmc_claude_prompt_compare "
+                "(the train split is very large; set an explicit cap)"
+            )
+        out = run_nmc_claude_prompt_compare(
+            args.dictionary,
+            max_problems=args.max_problems,
+            model=args.claude_model,
+            max_tokens=args.claude_max_tokens,
+            sleep_s=args.claude_sleep,
+            prompt_filename=args.nmc_prompt_file,
+            results_filename=args.nmc_results_file,
+        )
+        m = out["meta"]
+        print(
+            f"Wrote {os.path.join(m['dictionary'], args.nmc_results_file)}",
+            file=sys.stderr,
+        )
+        acc_s = m.get("accuracy_standard")
+        acc_p = m.get("accuracy_with_prompt")
+        ns = m.get("n_gradable_standard")
+        np_ = m.get("n_gradable_with_prompt")
+        cs = m.get("correct_count_standard")
+        cp = m.get("correct_count_with_prompt")
+
+        def _line(label: str, acc: float | None, c: int | None, n: int | None) -> str:
+            if acc is None or not n:
+                return f"{label}: n/a (no gradable \\boxed{{}} in gold for any problem)"
+            return f"{label}: {100.0 * acc:.2f}% ({c}/{n} correct)"
+
+        print(_line("Accuracy (standard, no extra prompt)", acc_s, cs, ns), file=sys.stderr)
+        print(_line("Accuracy (with dictionary prompt as system)", acc_p, cp, np_), file=sys.stderr)
+        raise SystemExit(0)
 
     if args.eval == "superchunk_prompt":
         if not args.dictionary:
@@ -834,7 +1100,6 @@ if __name__ == "__main__":
         )
         text = superchunk_llm_prompt_from_dictionary(
             args.dictionary,
-            max_examples=args.superchunk_max_examples,
             save_path=save_path,
         )
         if save_path:
