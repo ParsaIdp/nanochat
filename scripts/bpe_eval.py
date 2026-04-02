@@ -1,4 +1,5 @@
 import os
+import sys
 import pickle
 import argparse
 import numpy as np
@@ -10,6 +11,7 @@ import regex
 import tiktoken
 
 from nanochat.dataset import list_parquet_files, iter_docs_by_split, iter_numina_math_cot_docs
+from nanochat.tokenizer import token_id_to_token_str_map
 
 # GPT-4 pre-tokenization pattern: number of chunks per token = len(regex.findall(..., token_str))
 GPT4_PATTERN = regex.compile(
@@ -22,6 +24,115 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir
 DATASET_PATHS = {
     "c4": os.path.join(PROJECT_ROOT, "c4"),
 }
+
+
+def _unescape_token_mapping_value(s: str) -> str:
+    """Inverse of nanochat.tokenizer.write_token_mapping_file escapes (\\, \\t, \\n)."""
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            nxt = s[i + 1]
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if nxt == "t":
+                out.append("\t")
+                i += 2
+                continue
+            if nxt == "\\":
+                out.append("\\")
+                i += 2
+                continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
+
+
+def parse_token_mapping_file(token_mapping_path: str) -> dict[int, str]:
+    """
+    Load ``token_id -> token string`` from a TSV file written by
+    ``write_token_mapping_file`` (one line per id: ``id\\tescaped_string``).
+    """
+    m: dict[int, str] = {}
+    with open(token_mapping_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n\r")
+            if not line or "\t" not in line:
+                continue
+            tid_s, rest = line.split("\t", 1)
+            m[int(tid_s)] = _unescape_token_mapping_value(rest)
+    return m
+
+
+def load_id_to_str_for_dictionary(
+    dictionary_path: str,
+    token_mapping_filename: str = "token_mapping",
+) -> dict[int, str]:
+    """
+    Prefer on-disk ``token_mapping`` under ``dictionary_path``; otherwise build
+    the same mapping via ``token_id_to_token_str_map`` (tokenizer.pkl / HF json).
+    """
+    tm_path = os.path.join(dictionary_path, token_mapping_filename)
+    if os.path.isfile(tm_path):
+        return parse_token_mapping_file(tm_path)
+    return token_id_to_token_str_map(dictionary_path)
+
+
+def superchunk_llm_prompt_from_dictionary(
+    dictionary_path: str,
+    *,
+    min_token_id: int = 256,
+    max_examples: int = 80,
+    token_mapping_filename: str = "token_mapping",
+    example_display_max_len: int = 64,
+    save_path: str | None = None,
+) -> str:
+    """
+    Build instructional text for prompting an LLM that may emit **merged**
+    (post-byte-vocab) tokens: ids ``>= min_token_id`` (default 256), i.e. BPE
+    merges and any superchunk merges sharing the same id space.
+
+    Emphasizes normal reasoning first; compressed literals like ``[phrase→]``
+    only when they arise naturally, written as literal strings for correct tokenization.
+
+    If ``save_path`` is set, writes the prompt as UTF-8 to that file (e.g. the
+    dictionary folder's ``superchunk_llm_prompt.txt``).
+    """
+    id_to_str = load_id_to_str_for_dictionary(dictionary_path, token_mapping_filename)
+    merged = sorted(
+        (tid, s) for tid, s in id_to_str.items() if tid >= min_token_id
+    )
+    n_total = len(merged)
+    shown = merged[:max_examples]
+
+    def literal_line(token_str: str) -> str:
+        one_line = token_str.replace("\n", " ").replace("\r", "")
+        if len(one_line) > example_display_max_len:
+            one_line = one_line[: example_display_max_len - 1] + "..."
+        return f"[{one_line}→]"
+
+    example_lines = [literal_line(s) for _, s in shown]
+    examples_block = "\n".join(f"- {line}" for line in example_lines)
+    more_note = ""
+    if n_total > len(shown):
+        more_note = (
+            f"\n\n(Showing {len(shown)} of {n_total} tokens with id >= {min_token_id}; "
+            "the full vocabulary includes additional merged tokens.)"
+        )
+
+    text = f"""You have access to a compressed token vocabulary: some longer spans can be written as single tokens (ids >= {min_token_id}, i.e. beyond the raw byte vocabulary). When that is appropriate, you may express such a span as a **literal** bracket-and-arrow string: `[text→]` — for example `[United States→]` denotes the single token whose decoded text is that phrase (the arrow is part of the literal form for this setting).
+
+**How to use this:** Follow your **normal reasoning chain** (steps, algebra, verification) as you usually would. **Do not** force or sprinkle compressed forms just to use them; only use them when they fit naturally. If you do use one, write it **exactly** as a literal in this `[…→]` form so it can align with a single token.
+
+**Example literal forms** from this tokenizer's mapping (ids >= {min_token_id}):
+{examples_block}{more_note}
+"""
+    if save_path:
+        with open(save_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    return text
 
 
 def _byte_lens_from_file(path):
@@ -664,6 +775,7 @@ if __name__ == "__main__":
             "bytes_per_token_vs_vocab",
             "bytes_per_cot_len",
             "plot_cot_entropy",
+            "superchunk_prompt",
         ],
         help="Which evaluation to run.",
     )
@@ -692,7 +804,46 @@ if __name__ == "__main__":
         default=None,
         help="For bytes_per_cot_len: max NuminaMath-CoT problems (default: all). For plot_cot_entropy: number of problems (default: 5 if omitted).",
     )
+    parser.add_argument(
+        "--dictionary",
+        type=str,
+        default=None,
+        help="For superchunk_prompt: path to tokenizer directory (token_mapping or tokenizer.pkl inside).",
+    )
+    parser.add_argument(
+        "--superchunk_max_examples",
+        type=int,
+        default=80,
+        help="For superchunk_prompt: max example literals to list (default: 80).",
+    )
+    parser.add_argument(
+        "--superchunk_no_save",
+        action="store_true",
+        help="For superchunk_prompt: do not write superchunk_llm_prompt.txt under --dictionary.",
+    )
     args = parser.parse_args()
+
+    if args.eval == "superchunk_prompt":
+        if not args.dictionary:
+            parser.error("--dictionary is required for --eval superchunk_prompt")
+        dict_dir = os.path.abspath(args.dictionary)
+        save_path = (
+            None
+            if args.superchunk_no_save
+            else os.path.join(dict_dir, "superchunk_llm_prompt.txt")
+        )
+        text = superchunk_llm_prompt_from_dictionary(
+            args.dictionary,
+            max_examples=args.superchunk_max_examples,
+            save_path=save_path,
+        )
+        if save_path:
+            print(f"Saved to: {save_path}", file=sys.stderr)
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
+        raise SystemExit(0)
 
     bpt_names = args.datasets if args.datasets is not None else [args.dataset]
     dictionaries_path = f"{args.dataset}_dictionaries"
