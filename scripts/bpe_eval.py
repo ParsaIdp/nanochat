@@ -4,6 +4,7 @@ import json
 import time
 import pickle
 import argparse
+from urllib.parse import urlparse
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -91,12 +92,9 @@ def superchunk_llm_prompt_from_dictionary(
     save_path: str | None = None,
 ) -> str:
     """
-    Build instructional text for prompting an LLM that may emit **merged**
-    (post-byte-vocab) tokens: ids ``>= min_token_id`` (default 256), i.e. BPE
-    merges and any superchunk merges sharing the same id space.
-
-    Emphasizes normal reasoning first; compressed literals like ``[phrase→]``
-    only when they arise naturally, written as literal strings for correct tokenization.
+    Build instructional text for prompting an LLM on **merged** token strings
+    (ids ``>= min_token_id``): entries are listed as ``|<...>|``; the model must
+    emit the corresponding ``[text→]`` literals when those sequences appear.
 
     If ``save_path`` is set, writes the prompt as UTF-8 to that file (e.g. the
     dictionary folder's ``superchunk_llm_prompt.txt``).
@@ -106,21 +104,21 @@ def superchunk_llm_prompt_from_dictionary(
         (tid, s) for tid, s in id_to_str.items() if tid >= min_token_id
     )
 
-    def literal_line(token_str: str) -> str:
+    def superchunk_entry_line(token_str: str) -> str:
         one_line = token_str.replace("\n", " ").replace("\r", "")
         if len(one_line) > example_display_max_len:
             one_line = one_line[: example_display_max_len - 1] + "..."
-        return f"[{one_line}→]"
+        return f"|<{one_line}>|"
 
-    example_lines = [literal_line(s) for _, s in merged]
-    examples_block = "\n".join(f"- {line}" for line in example_lines)
+    entry_lines = [superchunk_entry_line(s) for _, s in merged]
+    examples_block = "\n".join(f"- {line}" for line in entry_lines)
 
-    text = f"""You have access to a compressed token vocabulary: some longer spans can be written as single tokens (ids >= {min_token_id}, i.e. beyond the raw byte vocabulary). When that is appropriate, you may express such a span as a **literal** bracket-and-arrow string: `[text→]` — for example `[United States→]` denotes the single token whose decoded text is that phrase (the arrow is part of the literal form for this setting).
+    text = f"""You have access to a compressed token vocabulary. Whenever you write a sequence of characters that exactly matches one of the entries below, you must write it as the corresponding literal [text→] form instead.
 
-**How to use this:** Follow your **normal reasoning chain** (steps, algebra, verification) as you usually would. **Do not** force or sprinkle compressed forms just to use them; only use them when they fit naturally. If you do use one, write it **exactly** as a literal in this `[…→]` form so it can align with a single token.
-
-**Example literal forms** from this tokenizer's mapping (ids >= {min_token_id}; all listed):
+Literal forms you must use (write exactly as shown):
 {examples_block}
+
+Apply this substitution consistently throughout your entire response — in reasoning steps, algebra, prose, and everywhere else. Do not skip a match or write the raw form when a literal form exists for it.
 """
     if save_path:
         with open(save_path, "w", encoding="utf-8", newline="\n") as f:
@@ -705,6 +703,74 @@ def grade_numina_boxed(pred_response: str, gold_solution: str) -> tuple[bool | N
 # Latest Sonnet on the Anthropic API (see https://docs.anthropic.com/en/docs/about-claude/models).
 DEFAULT_CLAUDE_SONNET_MODEL = "claude-sonnet-4-6"
 
+# Direct Anthropic API origin (no path). The SDK POSTs to ``/v1/messages`` relative to this.
+_OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+
+
+def _normalize_anthropic_base_url(url: str) -> str:
+    """
+    Strip accidental ``/v1/messages`` suffix (users sometimes paste the full endpoint
+    as the base URL). ``httpx`` can still merge paths oddly with some proxies.
+    """
+    u = url.strip().rstrip("/")
+    if u.lower().endswith("/v1/messages"):
+        u = u[: -len("/v1/messages")].rstrip("/")
+    return u
+
+
+def _make_anthropic_client(*, force_official_base: bool = False) -> object:
+    """
+    Build a sync ``Anthropic`` client.
+
+    If ``ANTHROPIC_BASE_URL`` points at an OpenAI-compatible proxy or a wrong host,
+    POST ``/v1/messages`` often fails with ``invalid_request_error`` /
+    ``Method Not Allowed``. Use ``force_official_base=True`` (CLI: ``--anthropic_official_api``)
+    or unset ``ANTHROPIC_BASE_URL`` to use ``https://api.anthropic.com``.
+    """
+    import anthropic
+
+    key = _anthropic_api_key()
+    if os.environ.get("ANTHROPIC_API_KEY") and os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        print(
+            "Warning: both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN are set. "
+            "For console API keys, unset ANTHROPIC_AUTH_TOKEN to avoid conflicting auth headers.",
+            file=sys.stderr,
+        )
+
+    if force_official_base:
+        print(
+            f"Using official Anthropic API ({_OFFICIAL_ANTHROPIC_BASE_URL}); "
+            "ignoring ANTHROPIC_BASE_URL.",
+            file=sys.stderr,
+        )
+        return anthropic.Anthropic(api_key=key, base_url=_OFFICIAL_ANTHROPIC_BASE_URL)
+
+    raw = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+    if not raw:
+        return anthropic.Anthropic(api_key=key)
+
+    normalized = _normalize_anthropic_base_url(raw)
+    if normalized != raw:
+        print(
+            f"Normalized ANTHROPIC_BASE_URL: {raw!r} -> {normalized!r}",
+            file=sys.stderr,
+        )
+    host = (urlparse(normalized).hostname or "").lower()
+    if host and host not in (
+        "api.anthropic.com",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ):
+        print(
+            f"Warning: ANTHROPIC_BASE_URL host is {host!r}. "
+            "If requests fail with 'Method Not Allowed', your proxy may not support "
+            "Anthropic's POST /v1/messages — unset ANTHROPIC_BASE_URL or use "
+            "--anthropic_official_api.",
+            file=sys.stderr,
+        )
+    return anthropic.Anthropic(api_key=key, base_url=normalized)
+
 
 def _anthropic_api_key() -> str:
     """Resolve API key; newer anthropic SDKs require ``api_key=`` explicitly (env alone may not suffice)."""
@@ -726,10 +792,13 @@ def _anthropic_message_text(
     model: str,
     max_tokens: int,
 ) -> str:
+    # Explicit text blocks — matches current Messages API examples and avoids edge cases.
     kwargs: dict = {
         "model": model,
         "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": user}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": user}]},
+        ],
     }
     if system:
         kwargs["system"] = system
@@ -750,6 +819,7 @@ def run_nmc_claude_prompt_compare(
     sleep_s: float = 0.0,
     prompt_filename: str = "superchunk_llm_prompt.txt",
     results_filename: str = "nmc_claude_prompt_compare.json",
+    anthropic_official_api: bool = False,
 ) -> dict:
     """
     For each NuminaMath-CoT problem (up to ``max_problems``), call Claude twice:
@@ -760,8 +830,6 @@ def run_nmc_claude_prompt_compare(
 
     Requires ``ANTHROPIC_API_KEY`` in the environment (passed explicitly to the client).
     """
-    import anthropic
-
     dict_dir = os.path.abspath(dictionary_path)
     prompt_path = os.path.join(dict_dir, prompt_filename)
     if not os.path.isfile(prompt_path):
@@ -774,7 +842,7 @@ def run_nmc_claude_prompt_compare(
         system_prompt = f.read()
 
     model = model or os.environ.get("ANTHROPIC_MODEL", DEFAULT_CLAUDE_SONNET_MODEL)
-    client = anthropic.Anthropic(api_key=_anthropic_api_key())
+    client = _make_anthropic_client(force_official_base=anthropic_official_api)
 
     results_rows: list[dict] = []
     gradable_standard: list[bool] = []
@@ -1070,6 +1138,12 @@ if __name__ == "__main__":
         default="nmc_claude_prompt_compare.json",
         help="For nmc_claude_prompt_compare: JSON output filename inside --dictionary.",
     )
+    parser.add_argument(
+        "--anthropic_official_api",
+        action="store_true",
+        help="For nmc_claude_prompt_compare: use https://api.anthropic.com and ignore ANTHROPIC_BASE_URL "
+        "(fixes 'Method Not Allowed' when a proxy/OpenAI URL is set).",
+    )
     args = parser.parse_args()
 
     if args.eval == "nmc_claude_prompt_compare":
@@ -1088,6 +1162,7 @@ if __name__ == "__main__":
             sleep_s=args.claude_sleep,
             prompt_filename=args.nmc_prompt_file,
             results_filename=args.nmc_results_file,
+            anthropic_official_api=args.anthropic_official_api,
         )
         m = out["meta"]
         print(
